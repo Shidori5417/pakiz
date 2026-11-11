@@ -1,0 +1,22 @@
+[package]
+name = "pakiz-capture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pakiz-dissect.workspace = true
+libc.workspace = true
+thiserror.workspace = true
+crossbeam-channel.workspace = true
+
+# Workspace lint'leri `unsafe_code = "forbid"` içerir; bu crate FFI için override eder.
+[lints.rust]
+unsafe_code = "allow"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+undocumented_unsafe_blocks = "deny"

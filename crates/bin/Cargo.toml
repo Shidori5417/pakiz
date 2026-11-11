@@ -1,0 +1,20 @@
+[package]
+name = "pakiz-bin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "pakiz"
+path = "src/main.rs"
+
+[dependencies]
+pakiz-capture.workspace = true
+pakiz-dissect.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+crossbeam-channel.workspace = true
+
+[lints]
+workspace = true
