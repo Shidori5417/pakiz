@@ -66,3 +66,37 @@ pub fn highlight_range(offset: usize, len: usize, data_len: usize) -> Option<Ran
     let end = offset.saturating_add(len).min(data_len);
     (start < end).then_some(start..end)
 }
+
+/// Her satırın kılavuz öneki (`│  ├─ `); kök (katman) satırlarında boş.
+/// `guides` = [`crate::IconSet::guides`] (orta dal, son dal, devam, boş).
+#[must_use]
+pub fn guide_prefixes(rows: &[TreeRow], guides: [&str; 4]) -> Vec<String> {
+    let [mid, last, cont, blank] = guides;
+    // Geriye doğru: her satır kardeşlerinin sonuncusu mu.
+    let mut is_last = vec![true; rows.len()];
+    let mut seen: Vec<bool> = Vec::new();
+    for (i, r) in rows.iter().enumerate().rev() {
+        if seen.len() <= r.depth {
+            seen.resize(r.depth + 1, false);
+        }
+        is_last[i] = !seen[r.depth];
+        seen[r.depth] = true;
+        seen.truncate(r.depth + 1);
+    }
+    // İleriye: üst atalar sonuncuysa boşluk, değilse dikey çizgi.
+    let mut anc: Vec<bool> = Vec::new();
+    let mut out = Vec::with_capacity(rows.len());
+    for (r, &last_sibling) in rows.iter().zip(&is_last) {
+        anc.truncate(r.depth);
+        let mut p = String::new();
+        if r.depth > 0 {
+            for &al in anc.iter().skip(1) {
+                p.push_str(if al { blank } else { cont });
+            }
+            p.push_str(if last_sibling { last } else { mid });
+        }
+        anc.push(last_sibling);
+        out.push(p);
+    }
+    out
+}

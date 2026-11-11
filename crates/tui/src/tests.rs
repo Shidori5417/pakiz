@@ -55,8 +55,15 @@ fn list_renders_only_visible_rows() {
     assert!(s.contains("Paketler") && s.contains("Katmanlar") && s.contains("Hex"));
     assert!(s.contains("10.0.0.1") && s.contains("UDP"));
     // Otomatik kaydırma: son paket görünür, ilk paket değil.
-    assert!(s.contains("│500 "));
-    assert!(!s.lines().any(|l| l.starts_with("│1 ")));
+    let first_col = |l: &str| {
+        l.trim_start_matches(['│', '▌'])
+            .trim_start()
+            .split(' ')
+            .next()
+            .map(str::to_owned)
+    };
+    assert!(s.lines().any(|l| first_col(l).as_deref() == Some("500")));
+    assert!(!s.lines().any(|l| first_col(l).as_deref() == Some("1")));
     assert!(s.contains("gösterilen/toplam: 500/500"));
     assert!(s.contains("AUTOSCROLL"));
 }
@@ -247,11 +254,9 @@ fn export_writes_displayed_packets() {
         app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
     }
     app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(app
-        .message
-        .as_deref()
-        .unwrap()
-        .starts_with("7 paket yazıldı"));
+    let toast = app.toast.as_ref().unwrap();
+    assert!(toast.text.starts_with("7 paket yazıldı"));
+    assert_eq!(toast.kind, ToastKind::Ok);
     assert_eq!(count_packets(&out), 7);
 
     // Dosya modunda (indeksleme bitmeden bile) tümü yazılır.
@@ -263,7 +268,8 @@ fn export_writes_displayed_packets() {
     app.on_key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE));
     app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
     app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(app.message.as_deref().unwrap().contains("bilinmeyen"));
+    let toast = app.toast.as_ref().unwrap();
+    assert!(toast.text.contains("bilinmeyen") && toast.kind == ToastKind::Error);
     std::fs::remove_file(out).unwrap();
     std::fs::remove_file(src).unwrap();
 }
@@ -720,8 +726,9 @@ fn follow_shows_lost_marker_and_scrolls_large_stream() {
     assert_eq!((c.fg, c.bg), (theme.rst_fg, theme.rst_bg));
     // Kayıp segment sonrası paket: "Previous segment not captured" (kötü TCP).
     let c = cell_of(&buf, "[TCP Previous segment not captured]").unwrap();
-    assert_eq!(c.fg, theme.bad_tcp_fg); // seçili satır: zemin seçim rengi
-                                        // Büyük akış: yalnızca görünen satırlar; G sona gider.
+    // Seçili satır: temanın seçim zemini + yüksek kontrastlı yazı (okunabilirlik).
+    assert_eq!((c.fg, c.bg), (theme.selected_fg, theme.selected_bg));
+    // Büyük akış: yalnızca görünen satırlar; G sona gider.
     app.selected = Some(7);
     app.apply(Action::Follow);
     let s = screen(&mut app, 100, 30);
@@ -950,4 +957,644 @@ fn coloring_rules_first_match_and_theme() {
     assert_eq!(c.fg, Theme::light().udp);
     // Zemin tema rengiyle boyanır.
     assert_eq!(buf[(119, 29)].bg, Theme::light().status_bg);
+}
+
+// ------------------------------------------------------------------ yeni arayüz
+
+use ratatui::style::Color;
+
+#[allow(clippy::many_single_char_names)]
+fn lum(c: Color) -> Option<f64> {
+    let Color::Rgb(r, g, b) = c else { return None };
+    let f = |v: u8| {
+        let v = f64::from(v) / 255.0;
+        if v <= 0.03928 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    Some(0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b))
+}
+
+/// WCAG kontrast oranı (Rgb olmayan renkler için `None`).
+fn contrast(a: Color, b: Color) -> Option<f64> {
+    let (x, y) = (lum(a)?, lum(b)?);
+    Some((x.max(y) + 0.05) / (x.min(y) + 0.05))
+}
+
+#[test]
+fn themes_have_readable_contrast() {
+    for name in Theme::NAMES {
+        let t = Theme::by_name(name).unwrap();
+        for (what, fg, bg) in [
+            ("seçim", t.selected_fg, t.selected_bg),
+            ("filtre hatası", t.filter_err_fg, t.filter_err_bg),
+            ("filtre geçerli", t.filter_err_fg, t.filter_ok_bg),
+            ("vurgu", t.badge_fg, t.accent),
+            ("hex vurgu", t.hex_highlight_fg, t.hex_highlight_bg),
+            ("toast", t.toast_fg, t.toast_bg),
+        ] {
+            if let Some(c) = contrast(fg, bg) {
+                assert!(c >= 4.5, "{name}/{what}: kontrast {c:.2}");
+            }
+        }
+        for p in ["tcp", "udp", "arp", "icmp", "dns", "http"] {
+            if let Some(c) = contrast(t.badge_fg, t.protocol_color(p, false)) {
+                assert!(c >= 4.5, "{name}/rozet {p}: kontrast {c:.2}");
+            }
+        }
+    }
+    assert!(Theme::by_name("Ocean").is_some() && Theme::by_name("forest").is_some());
+}
+
+#[test]
+fn header_bar_shows_source_badge_and_tabs() {
+    let mut app = app_with(5, 100);
+    let s = screen(&mut app, 120, 30);
+    let top: Vec<&str> = s.lines().take(2).collect();
+    assert!(top[0].contains("pakiz") && top[0].contains("test0"), "{s}");
+    assert!(top[0].contains("DOSYA") && top[0].contains("pps"), "{s}");
+    for tab in ["Paketler", "Akış", "Konuşmalar", "İstatistik"] {
+        assert!(top[1].contains(tab), "{tab}: {s}");
+    }
+    // Kısayol ipuçları gerçek keymap'ten.
+    assert!(
+        top[1].contains("Akış F") && top[1].contains("İstatistik S"),
+        "{s}"
+    );
+    app.enable_live();
+    assert!(screen(&mut app, 120, 30)
+        .lines()
+        .next()
+        .unwrap()
+        .contains("CANLI"));
+    app.apply(Action::Pause);
+    let s = screen(&mut app, 120, 30);
+    assert!(s.lines().next().unwrap().contains("DURAKLATILDI"), "{s}");
+    // ASCII kipinde yalnızca düz metin rozet.
+    app.icons = IconSet::Ascii;
+    let first = screen(&mut app, 120, 30).lines().next().unwrap().to_owned();
+    assert!(
+        first.is_ascii() && first.contains("DURAKLATILDI"),
+        "{first}"
+    );
+    // Aktif sekme vurgulu.
+    let theme = Theme::default();
+    let buf = cells(&mut app, 120, 30);
+    assert_eq!(cell_of(&buf, "Paketler").unwrap().bg, theme.accent);
+    assert_ne!(cell_of(&buf, "Konuşmalar").unwrap().bg, theme.accent);
+}
+
+#[test]
+fn list_has_badges_bar_zebra_and_high_contrast_selection() {
+    let mut app = app_with(6, 100);
+    app.autoscroll = false;
+    app.selected = Some(2);
+    let theme = Theme::default();
+    let buf = cells(&mut app, 140, 30);
+    let find_row = |n: &str| -> u16 {
+        (0..buf.area.height)
+            .find(|&y| {
+                let l: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+                l.contains("10.0.0.1") && l.trim_start_matches(['│', '▌', ' ']).starts_with(n)
+            })
+            .unwrap()
+    };
+    let (r1, r3, r4) = (find_row("1 "), find_row("3 "), find_row("4 "));
+    let udp = theme.badge_color("UDP", false);
+    // Sol vurgu çubuğu protokol renginde.
+    assert_eq!((buf[(1, r1)].symbol(), buf[(1, r1)].fg), ("▌", udp));
+    // Rozet: renkli zemin + koyu yazı.
+    let badge = cell_of(&buf, "UDP").unwrap();
+    assert_eq!((badge.bg, badge.fg), (udp, theme.badge_fg));
+    // Zebra: tek indeksli (2. paket) satır hafif zeminli, çift olan değil.
+    let r2 = r1 + 1;
+    assert_eq!(buf[(30, r2)].bg, theme.zebra_bg);
+    assert_ne!(buf[(30, r1)].bg, theme.zebra_bg);
+    // Seçili (3. paket): seçim zemini + yüksek kontrastlı yazı, çubuk hâlâ protokol renginde.
+    assert_eq!(
+        (buf[(30, r3)].bg, buf[(30, r3)].fg),
+        (theme.selected_bg, theme.selected_fg)
+    );
+    assert_eq!(buf[(1, r3)].fg, udp);
+    assert_ne!(buf[(30, r4)].bg, theme.selected_bg);
+    // Uzunluk sağa hizalı: değer sütunun son hücrelerinde.
+    let row: String = (0..buf.area.width).map(|x| buf[(x, r1)].symbol()).collect();
+    assert!(row.contains("46 "), "{row}");
+}
+
+#[test]
+fn analysis_flag_icons_in_dedicated_column() {
+    let mut app = app_from(http_session(), 100);
+    app.ingest();
+    app.autoscroll = false;
+    app.selected = Some(0);
+    let s = screen(&mut app, 160, 40);
+    let retx = s
+        .lines()
+        .find(|l| l.contains("[TCP Retransmission]"))
+        .unwrap();
+    assert!(retx.contains('⚠'), "{retx}");
+    assert_eq!(IconSet::Unicode.flag(pakiz_flow::AnalysisFlags::RST), "✖");
+    assert_eq!(
+        IconSet::Unicode.flag(pakiz_flow::AnalysisFlags::ZERO_WINDOW),
+        "⊘"
+    );
+    assert_eq!(
+        IconSet::Unicode.flag(pakiz_flow::AnalysisFlags::default()),
+        " "
+    );
+    app.icons = IconSet::Ascii;
+    let s = screen(&mut app, 160, 40);
+    let retx = s
+        .lines()
+        .find(|l| l.contains("[TCP Retransmission]"))
+        .unwrap();
+    assert!(retx.contains('!') && !retx.contains('⚠'), "{retx}");
+}
+
+#[test]
+fn empty_states_centered() {
+    let mut app = app_with(0, 10);
+    let s = screen(&mut app, 100, 30);
+    let line = s.lines().find(|l| l.contains("Paket bekleniyor…")).unwrap();
+    // Ortalanmış: sol ve sağ boşluk yaklaşık eşit.
+    let l = line.chars().take_while(|c| !c.is_alphabetic()).count();
+    let r = line
+        .chars()
+        .rev()
+        .take_while(|c| !c.is_alphabetic())
+        .count();
+    assert!(l.abs_diff(r) <= 4, "{line:?}");
+    assert!(!line.contains('⠋') || !app.is_live());
+    // Canlıda spinner.
+    app.enable_live();
+    let line = screen(&mut app, 100, 30)
+        .lines()
+        .find(|l| l.contains("Paket bekleniyor"))
+        .unwrap()
+        .to_owned();
+    assert!(
+        line.chars().any(|c| ('\u{2800}'..='\u{28ff}').contains(&c)),
+        "{line}"
+    );
+    // Filtreyle eşleşen yok.
+    let mut app = app_with(3, 10);
+    app.set_filter("tcp").unwrap();
+    app.ingest();
+    assert_eq!(app.displayed_len(), 0);
+    let s = screen(&mut app, 100, 30);
+    assert!(s.contains("Filtreyle eşleşen paket yok"), "{s}");
+    assert!(s.contains("Paketler 0/3"), "{s}");
+}
+
+#[test]
+fn panel_titles_rounded_and_focus_styles() {
+    let mut app = app_with(30, 100);
+    let theme = Theme::default();
+    let buf = cells(&mut app, 120, 40);
+    let s = screen(&mut app, 120, 40);
+    assert!(s.contains("Paketler 30/30"), "{s}");
+    assert!(s.contains('╭') && s.contains('╯') && !s.contains('┌'));
+    // Odaklı liste: vurgu rengi + kalın; odaksız ağaç: soluk.
+    let list = cell_of(&buf, "Paketler 30/30").unwrap();
+    assert_eq!(list.fg, theme.accent);
+    let tree = cell_of(&buf, "Katmanlar").unwrap();
+    assert_eq!(tree.fg, theme.dim);
+    // Kaydırma çubuğu (30 paket > görünen).
+    assert!(s.contains('┃'), "{s}");
+}
+
+#[test]
+fn tree_guides_arrows_and_byte_range_title() {
+    let mut app = app_with(1, 10);
+    app.apply(Action::NextPanel);
+    app.apply(Action::Bottom);
+    app.apply(Action::Up); // udp
+    app.apply(Action::Expand);
+    app.apply(Action::Down); // ilk alan
+    let s = screen(&mut app, 120, 40);
+    assert!(s.contains("▾ User Datagram"), "{s}");
+    assert!(s.contains("├─") && s.contains("└─"), "{s}");
+    assert!(s.contains("bayt 34..36"), "{s}");
+    // Hex başlığında alan adı.
+    let hex_title = s.lines().find(|l| l.contains("Hex")).unwrap();
+    assert!(
+        hex_title.contains("Source Port") || hex_title.contains("port"),
+        "{hex_title}"
+    );
+    // Kılavuz öneklerinin geometrisi.
+    let rows = app.tree().unwrap().1.to_vec();
+    let pre = guide_prefixes(&rows, IconSet::Unicode.guides());
+    assert_eq!(pre[0], "");
+    let last_child = rows.iter().rposition(|r| r.depth == 1).unwrap();
+    assert!(pre[last_child].ends_with("└─ "));
+    assert!(pre.iter().any(|p| p.ends_with("├─ ")));
+}
+
+#[test]
+fn hex_byte_classes_and_same_highlight_color() {
+    let theme = Theme::default();
+    let data = [0u8, 0x41, 0x07, 0xff, 0x42];
+    let line = hex_line(&data, 0, Some(&(1..2)), &theme);
+    let fg_of = |text: &str| {
+        line.spans
+            .iter()
+            .find(|s| s.content == text)
+            .map(|s| s.style.fg)
+    };
+    assert_eq!(fg_of("00"), Some(Some(theme.dim)));
+    assert_eq!(fg_of("07"), Some(Some(theme.hex_ctrl)));
+    assert_eq!(fg_of("ff"), Some(Some(theme.hex_high)));
+    assert_eq!(fg_of("42"), Some(None));
+    // Ofset sütunu soluk; vurgu hex ve ASCII'de aynı stil.
+    assert_eq!(line.spans[0].style.fg, Some(theme.dim));
+    let hl: Vec<_> = line
+        .spans
+        .iter()
+        .filter(|s| s.style.bg == Some(theme.hex_highlight_bg))
+        .collect();
+    assert_eq!(hl.len(), 2);
+    assert_eq!(hl[0].style, hl[1].style);
+}
+
+#[test]
+fn filter_error_is_readable_and_not_truncated() {
+    let mut app = app_with(3, 10);
+    let theme = Theme::default();
+    key(&mut app, KeyCode::Char('/'));
+    type_str(&mut app, "ip.ttl ==");
+    // Dar terminalde de tam mesaj ayrı kutuda, kırmızı zemin üstünde açık yazı.
+    let buf = cells(&mut app, 60, 20);
+    let c = cell_of(&buf, "hata:").unwrap();
+    assert_eq!((c.fg, c.bg), (theme.filter_err_fg, theme.filter_err_bg));
+    assert_ne!(c.fg, c.bg);
+    let FilterState::Invalid(e) = app.input.as_ref().unwrap().state.clone() else {
+        panic!("hata bekleniyordu");
+    };
+    let s = screen(&mut app, 60, 20);
+    let joined: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    for word in e.msg.split_whitespace() {
+        assert!(joined.contains(word), "{word:?} kesilmiş: {s}");
+    }
+}
+
+#[test]
+fn status_bar_segments() {
+    let mut app = app_with(4, 100);
+    let theme = Theme::default();
+    let s = screen(&mut app, 140, 30);
+    let status = s.lines().last().unwrap();
+    for part in [
+        "NORMAL",
+        "gösterilen/toplam: 4/4",
+        "düşen: 0",
+        "AUTOSCROLL",
+        "?: yardım",
+    ] {
+        assert!(status.contains(part), "{part}: {status}");
+    }
+    assert!(status.trim_end().ends_with("?: yardım"), "{status}");
+    // Mod rozeti.
+    key(&mut app, KeyCode::Char('/'));
+    assert!(screen(&mut app, 140, 30)
+        .lines()
+        .last()
+        .unwrap()
+        .contains("FİLTRE"));
+    key(&mut app, KeyCode::Esc);
+    key(&mut app, KeyCode::Char(':'));
+    assert!(screen(&mut app, 140, 30)
+        .lines()
+        .last()
+        .unwrap()
+        .contains("KOMUT"));
+    key(&mut app, KeyCode::Esc);
+    // Düşen > 0: uyarı rengi.
+    let mut small = app_with(10, 4);
+    let buf = cells(&mut small, 140, 30);
+    let c = cell_of(&buf, "düşen: 6").unwrap();
+    assert_eq!(c.bg, theme.warn);
+    let buf = cells(&mut app, 140, 30);
+    assert_ne!(cell_of(&buf, "düşen: 0").unwrap().bg, theme.warn);
+}
+
+#[test]
+fn help_lists_keys_from_real_keymap() {
+    let mut app = app_with(1, 10);
+    app.keymap
+        .set(Action::Filter, &[(KeyCode::Char('x'), KeyModifiers::NONE)]);
+    app.keymap.set(
+        Action::Zoom,
+        &[
+            (KeyCode::Char('Z'), KeyModifiers::NONE),
+            (KeyCode::F(2), KeyModifiers::NONE),
+        ],
+    );
+    key(&mut app, KeyCode::Char('?'));
+    let s = screen(&mut app, 120, 40);
+    for g in ["Gezinme", "Paneller", "Görünümler", "Filtre", "Yakalama"] {
+        assert!(s.contains(g), "{g}: {s}");
+    }
+    let keys_before = |needle: &str| {
+        let l = s.lines().find(|l| l.contains(needle)).unwrap();
+        l[..l.find(needle).unwrap()].trim_end().to_owned()
+    };
+    assert!(keys_before("display filter").ends_with(" x"), "{s}");
+    assert!(
+        keys_before("odaklı paneli büyüt / geri al").ends_with("F2 / Z"),
+        "{s}"
+    );
+    assert!(!s.contains("/ display"));
+    // Atanmamış eylem de belirtilir; yeni eylemler listelenir.
+    for needle in ["dikey ↔ yatay düzen", "odaklı paneli küçült"] {
+        assert!(s.contains(needle), "{needle}");
+    }
+    // İki sütun: aynı satırda iki grup başlığı.
+    assert!(
+        s.lines()
+            .any(|l| l.contains("Gezinme") && l.contains("Paneller")),
+        "{s}"
+    );
+    // Esc / ? / q kapatır.
+    for k in [KeyCode::Esc, KeyCode::Char('?'), KeyCode::Char('q')] {
+        key(&mut app, KeyCode::Char('?'));
+        if app.show_help {
+            key(&mut app, k);
+        }
+        assert!(!app.show_help, "{k:?}");
+        app.show_help = true;
+        key(&mut app, k);
+        assert!(!app.show_help, "{k:?}");
+    }
+    assert!(!app.quit);
+}
+
+#[test]
+fn command_palette_filters_and_selects() {
+    let mut app = app_with(2, 100);
+    key(&mut app, KeyCode::Char(':'));
+    let s = screen(&mut app, 100, 30);
+    assert!(s.contains("Komutlar 9"), "{s}");
+    for c in [
+        "follow",
+        "conv",
+        "stats",
+        "theme <ad>",
+        "layout",
+        "w <dosya>",
+    ] {
+        assert!(s.contains(c), "{c}: {s}");
+    }
+    // Önek + fuzzy süzme.
+    type_str(&mut app, "th");
+    let names: Vec<String> = app.palette().into_iter().map(|c| c.label).collect();
+    assert_eq!(names[0], "theme <ad>");
+    key(&mut app, KeyCode::Backspace);
+    key(&mut app, KeyCode::Backspace);
+    type_str(&mut app, "cv");
+    assert_eq!(app.palette()[0].text, "conv");
+    // Tab adayı tamamlar, ↑/↓ seçer.
+    key(&mut app, KeyCode::Backspace);
+    key(&mut app, KeyCode::Backspace);
+    type_str(&mut app, "s");
+    let labels: Vec<String> = app.palette().into_iter().map(|c| c.text).collect();
+    assert_eq!(labels[0], "stats");
+    key(&mut app, KeyCode::Down);
+    assert_eq!(app.palette_sel, 1);
+    key(&mut app, KeyCode::Up);
+    key(&mut app, KeyCode::Up);
+    assert_eq!(app.palette_sel, labels.len() - 1);
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Tab);
+    assert_eq!(app.input.as_ref().unwrap().text, "stats");
+    // Enter, ↑/↓ ile seçilmiş tam komutu çalıştırır.
+    key(&mut app, KeyCode::Backspace);
+    key(&mut app, KeyCode::Backspace);
+    key(&mut app, KeyCode::Backspace);
+    key(&mut app, KeyCode::Backspace);
+    key(&mut app, KeyCode::Backspace);
+    type_str(&mut app, "co");
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Up);
+    key(&mut app, KeyCode::Enter);
+    assert!(app.input.is_none());
+    assert_eq!(app.view, View::Conversations);
+    key(&mut app, KeyCode::Esc);
+    // Argümanlı komut ↑/↓ ile seçilirse Enter yalnızca tamamlar, satır açık kalır.
+    key(&mut app, KeyCode::Char(':'));
+    type_str(&mut app, "lay");
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Up);
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(app.input.as_ref().unwrap().text, "layout ");
+    key(&mut app, KeyCode::Esc);
+    // Argümanlı komut: Tab argüman adaylarına geçer.
+    let mut app = app_with(1, 10);
+    key(&mut app, KeyCode::Char(':'));
+    type_str(&mut app, "the");
+    key(&mut app, KeyCode::Tab);
+    assert_eq!(app.input.as_ref().unwrap().text, "theme ");
+    let args: Vec<String> = app.palette().into_iter().map(|c| c.text).collect();
+    assert_eq!(
+        args,
+        ["theme dark", "theme light", "theme ocean", "theme forest"]
+    );
+    type_str(&mut app, "oc");
+    assert_eq!(app.palette().len(), 1);
+    assert!(screen(&mut app, 100, 30).contains("theme ocean"));
+}
+
+#[test]
+fn theme_command_switches_at_runtime_and_keeps_user_rules() {
+    let mut app = app_with(3, 10);
+    let rule = ColorRule::new("udp", &app.catalog, Some(Color::Rgb(1, 2, 3)), None).unwrap();
+    app.set_theme(Theme::dark(), vec![rule]).unwrap();
+    assert_eq!(app.coloring.len(), 10);
+    let run = |app: &mut App, cmd: &str| {
+        key(app, KeyCode::Char(':'));
+        type_str(app, cmd);
+        key(app, KeyCode::Enter);
+    };
+    run(&mut app, "theme ocean");
+    assert_eq!(app.theme.accent, Theme::ocean().accent);
+    assert_eq!(app.theme.bg, Theme::ocean().bg);
+    assert_eq!(
+        app.coloring.len(),
+        10,
+        "kullanıcı kuralı korunmalı, varsayılanlar tekrarlanmamalı"
+    );
+    assert_eq!(app.coloring[0].source, "udp");
+    assert_eq!(app.toast.as_ref().unwrap().text, "tema: ocean");
+    // Yeni tema çizime yansır.
+    let buf = cells(&mut app, 100, 30);
+    assert_eq!(buf[(99, 29)].bg, Theme::ocean().status_bg);
+    run(&mut app, "theme forest");
+    assert_eq!(app.theme.accent, Theme::forest().accent);
+    run(&mut app, "theme mor");
+    let t = app.toast.as_ref().unwrap();
+    assert_eq!(t.kind, ToastKind::Error);
+    assert!(t.text.contains("bilinmeyen tema") && t.text.contains("ocean"));
+    assert_eq!(app.theme.accent, Theme::forest().accent);
+    run(&mut app, "icons ascii");
+    assert_eq!(app.icons, IconSet::Ascii);
+    run(&mut app, "icons nerd");
+    assert_eq!(app.icons, IconSet::Nerd);
+}
+
+#[test]
+fn toast_shows_top_right_and_times_out() {
+    let mut app = app_with(3, 10);
+    app.notify(ToastKind::Ok, "w → 1234 paket kaydedildi");
+    let s = screen(&mut app, 120, 30);
+    let line = s
+        .lines()
+        .position(|l| l.contains("1234 paket kaydedildi"))
+        .unwrap();
+    assert!(line <= 5, "sağ üstte olmalı: {line}");
+    let l = s.lines().nth(line).unwrap();
+    assert!(
+        l.chars().count() - l.find('1').unwrap() < 40,
+        "sağda olmalı: {l}"
+    );
+    // Süre dolmadan kalır.
+    assert!(!app.expire_toast());
+    assert!(app.toast.is_some());
+    // Süre dolunca ingest kaldırır ve yeniden çizim ister.
+    app.toast.as_mut().unwrap().born = std::time::Instant::now()
+        .checked_sub(TOAST_TTL + Duration::from_millis(50))
+        .unwrap();
+    assert!(app.ingest());
+    assert!(app.toast.is_none());
+    assert!(!screen(&mut app, 120, 30).contains("kaydedildi"));
+    // Uzun hata mesajı kesilmez, sarılır.
+    app.notify(
+        ToastKind::Error,
+        "yazılamadı: ".to_owned() + &"izin reddedildi ".repeat(8),
+    );
+    let s = screen(&mut app, 80, 30);
+    assert_eq!(s.matches("izin").count(), 8, "{s}");
+}
+
+#[test]
+fn zoom_layout_toggle_and_resize() {
+    let mut app = app_with(20, 100);
+    let _ = screen(&mut app, 120, 40);
+    let normal = app.areas;
+    assert!(normal.list.y < normal.tree.y && normal.tree.y < normal.hex.y);
+    assert_eq!(normal.list.width, normal.tree.width);
+    // z: odaklı panel tüm gövdeyi kaplar, ötekiler gizlenir; tekrar z geri alır.
+    key(&mut app, KeyCode::Char('z'));
+    let s = screen(&mut app, 120, 40);
+    assert!(app.layout.zoom && app.areas.list.height > normal.list.height);
+    assert_eq!(app.areas.tree.area(), 0);
+    assert!(!s.contains("Katmanlar") && s.contains("Paketler"), "{s}");
+    assert!(s.contains("zoom"));
+    key(&mut app, KeyCode::Tab);
+    let s = screen(&mut app, 120, 40);
+    assert!(
+        s.contains("Katmanlar") && !s.contains("Hex") && app.areas.list.area() == 0,
+        "{s}"
+    );
+    key(&mut app, KeyCode::Char('z'));
+    let _ = screen(&mut app, 120, 40);
+    assert_eq!(app.areas.hex, normal.hex);
+    // L: yatay düzen: liste üstte, ağaç | hex yan yana.
+    key(&mut app, KeyCode::Char('L'));
+    let s = screen(&mut app, 120, 40);
+    let (t, h) = (app.areas.tree, app.areas.hex);
+    assert!(
+        app.layout.horizontal && t.y == h.y && t.right() == h.x,
+        "{t:?} {h:?}"
+    );
+    assert!(app.areas.list.bottom() == t.y && app.areas.list.width == 120);
+    assert!(s.contains("yatay"));
+    key(&mut app, KeyCode::Char('L'));
+    let _ = screen(&mut app, 120, 40);
+    assert!(app.areas.tree.y < app.areas.hex.y);
+    // +/-: liste odaktayken liste büyür/küçülür; sınırlara kırpılır.
+    app.focus = Panel::List;
+    let h0 = app.areas.list.height;
+    key(&mut app, KeyCode::Char('+'));
+    let _ = screen(&mut app, 120, 40);
+    assert!(app.areas.list.height > h0);
+    key(&mut app, KeyCode::Char('-'));
+    key(&mut app, KeyCode::Char('-'));
+    let _ = screen(&mut app, 120, 40);
+    assert!(app.areas.list.height < h0);
+    for _ in 0..30 {
+        key(&mut app, KeyCode::Char('-'));
+    }
+    assert_eq!(app.layout.split, LayoutState::MIN_SPLIT);
+    app.apply(Action::NextPanel); // ağaç odakta: "+" alttaki panelleri büyütür (liste küçülür).
+    key(&mut app, KeyCode::Char('+'));
+    assert_eq!(app.layout.split, LayoutState::MIN_SPLIT);
+    // Düzen durumu görünüm değişince korunur.
+    key(&mut app, KeyCode::Char('L'));
+    key(&mut app, KeyCode::Char('S'));
+    key(&mut app, KeyCode::Esc);
+    assert!(app.layout.horizontal);
+    // Komutla da.
+    key(&mut app, KeyCode::Char(':'));
+    type_str(&mut app, "layout vertical");
+    key(&mut app, KeyCode::Enter);
+    assert!(!app.layout.horizontal);
+}
+
+#[test]
+fn stats_view_has_axis_chart_and_distribution_bars() {
+    let mut pk = http_session();
+    pk.push(udp_packet(9));
+    let mut app = app_from(pk, 100);
+    app.ingest();
+    key(&mut app, KeyCode::Char('S'));
+    let s = screen(&mut app, 150, 36);
+    assert!(
+        s.contains("şimdi") && s.contains("Paket/sn") && s.contains("Bayt/sn"),
+        "{s}"
+    );
+    assert!(s.contains("Protokol dağılımı"), "{s}");
+    assert!(s.contains('━'), "{s}");
+    let tcp = s
+        .lines()
+        .find(|l| l.contains("tcp") && l.contains('━'))
+        .unwrap();
+    assert!(tcp.contains('%'), "{tcp}");
+    // Dar alanda sparkline'a düşer (eksen etiketi yok), çökmez.
+    let s = screen(&mut app, 60, 24);
+    assert!(s.contains("Paket/sn") && !s.contains("şimdi"), "{s}");
+}
+
+#[test]
+fn small_terminals_do_not_panic() {
+    let mut app = app_with(5, 10);
+    for (w, h) in [(10, 4), (30, 8), (50, 12)] {
+        let _ = screen(&mut app, w, h);
+        app.show_help = true;
+        let _ = screen(&mut app, w, h);
+        app.show_help = false;
+        app.notify(ToastKind::Warn, "uyarı");
+        key(&mut app, KeyCode::Char(':'));
+        let _ = screen(&mut app, w, h);
+        key(&mut app, KeyCode::Esc);
+        key(&mut app, KeyCode::Char('z'));
+        let _ = screen(&mut app, w, h);
+        key(&mut app, KeyCode::Char('z'));
+    }
+}
+
+#[test]
+fn icon_sets() {
+    assert_eq!(IconSet::from_name("NERD"), Some(IconSet::Nerd));
+    assert_eq!(IconSet::from_name("emoji"), None);
+    assert_eq!(IconSet::default(), IconSet::Unicode);
+    let mut app = app_with(4, 10);
+    app.icons = IconSet::Ascii;
+    let s = screen(&mut app, 120, 30);
+    assert!(!s.contains(['▌', '⚠', '●', '◆', '▸', '▾', '⠋']), "{s}");
+    assert!(s.contains("Paket"));
+    app.icons = IconSet::Nerd;
+    let s = screen(&mut app, 120, 30);
+    assert!(s.contains('\u{f15b}'), "nerd dosya ikonu: {s}");
 }

@@ -30,7 +30,10 @@ arayüz ratatui ile çizilir. Çalışma zamanında libpcap gerekmez.
   port tabloları, DNS cevaplarından ad çözümleme, canlıda paketin yerel süreci
   (sock_diag, olmazsa `/proc`).
 - **TUI**: üç panel (liste / katman ağacı / hex), vim tuşları, fare, sanal kaydırma,
-  halka tampon, dark/light tema, config'ten tuş ve renklendirme kuralları.
+  halka tampon, dört yerleşik tema (dark, light, ocean, forest; `:theme` ile
+  çalışırken değişir), üst başlık çubuğu ve sekmeler, protokol rozetli liste,
+  durum çubuğu, geçici bildirimler, komut paleti, config'ten üretilen yardım
+  penceresi, panel büyütme / yatay düzen, config'ten tuş ve renklendirme kuralları.
 - **TUI'siz kullanım**: `--no-tui` satır çıktısı, `--count` sayaç modu, `--stats`
   özet; `-r a.pcap -Y ... -w b.pcapng` ile süzerek dönüştürme.
 
@@ -39,8 +42,14 @@ arayüz ratatui ile çizilir. Çalışma zamanında libpcap gerekmez.
 | Display filter: Tab ile tamamlama | Follow Stream (`F`) |
 |---|---|
 | ![Filtre satırı ve aday listesi](docs/img/filter-tab.svg) | ![Follow TCP Stream: istemci kırmızı, sunucu mavi](docs/img/follow.svg) |
-| **İstatistik (`S`)**: sparkline'lar + protokol hiyerarşisi | **Konuşmalar (`c`)** |
+| **İstatistik (`S`)**: eksenli pps/bps grafiği, tablolar, protokol dağılımı | **Konuşmalar (`c`)** |
 | ![İstatistik görünümü](docs/img/stats.svg) | ![Konuşmalar tablosu](docs/img/conversations.svg) |
+| **Yardım (`?`)**: tuşlar gerçek keymap'ten (config atamaları dahil) | **Komut paleti (`:`)**: aday listesi, Tab / ↑↓ |
+| ![Yardım penceresi](docs/img/help.svg) | ![Komut paleti](docs/img/palette.svg) |
+
+**Yatay düzen (`L`)**: liste üstte, katman ağacı ve hex yan yana.
+
+![Yatay düzen](docs/img/layout-h.svg)
 
 <details>
 <summary>Filtre satırı: geçerli (yeşil) ve hatalı (kırmızı) durum</summary>
@@ -102,7 +111,7 @@ pakiz -r a.pcap -Y http -w b.pcapng     # süz ve pcapng'ye dönüştür
 pakiz -r a.pcap --stats                 # protokol dağılımı + top talkers
 pakiz -i eth0 --count                   # saniyede bir paket/bayt/düşen sayacı
 pakiz --list-interfaces
-pakiz --theme light                     # açık tema
+pakiz --theme ocean                     # yerleşik tema (dark, light, ocean, forest)
 pakiz --dump-config > ~/.config/pakiz/config.toml
 ```
 
@@ -122,7 +131,7 @@ pakiz --dump-config > ~/.config/pakiz/config.toml
 | `--stats` | Sonda özet istatistik |
 | `-n, --resolve` | DNS'ten öğrenilen adları göster |
 | `--max-packets <N>` | Bellekte tutulacak en fazla paket |
-| `--theme <AD>` | `dark` veya `light` |
+| `--theme <AD>` | `dark`, `light`, `ocean` veya `forest` |
 | `--config <YOL>` | Başka bir config dosyası |
 | `--dump-config` | Varsayılan config'i yaz ve çık |
 | `--no-promisc`, `--force-recv` | Promiscuous modu kapat / mmap yerine `recvfrom` |
@@ -143,7 +152,10 @@ sürüm gösterir.
 | `Enter` / `Space` | ağaçta aç/kapa (`toggle`) |
 | `h` / `←`, `l` / `→` | kapa / aç (`collapse`, `expand`) |
 | `/` | display filter (Tab tamamlar, ↑/↓ geçmiş) (`filter`) |
-| `:` | komut: `:q`, `:w dosya`, `:follow`, `:conv`, `:stats` (`command`) |
+| `:` | komut paleti: `:q`, `:w dosya`, `:follow`, `:conv`, `:stats`, `:packets`, `:theme <ad>`, `:layout <vertical\|horizontal\|zoom>`, `:icons <unicode\|nerd\|ascii>`; yazdıkça aday listesi süzülür, Tab tamamlar, ↑/↓ seçer (`command`) |
+| `z` | odaklı paneli büyüt / geri al (`zoom`) |
+| `L` | dikey ↔ yatay düzen: liste üstte, ağaç \| hex yan yana (`toggle_layout`) |
+| `+` / `-` | odaklı paneli büyüt / küçült, liste payı %15..%75 (`grow`, `shrink`) |
 | `p` | duraklat / devam (`pause`) |
 | `a` | otomatik kaydırma (`autoscroll`) |
 | `F` | seçili akışı izle, Follow Stream (`follow`) |
@@ -154,7 +166,7 @@ sürüm gösterir.
 | `s` | Konuşmalar: sıralama sütunu (`sort`) |
 | `1`-`4` | İstatistik alt sekmesi (`tab1`..`tab4`) |
 | `Esc` | görünümden geri (`back`) |
-| `?` | yardım (`help`) |
+| `?` | yardım; `Esc`, `?` veya `q` kapatır (`help`) |
 | `q` / `Ctrl-c` | çıkış; ek görünümdeyken geri (`quit`) |
 | fare | tıklayınca seçer, tekerlekle kaydırır |
 
@@ -209,10 +221,11 @@ max_packets = 200000
 fps = 30
 resolve_names = true
 autoscroll = true
+icons = "unicode"       # unicode | nerd (Nerd Font gerekir) | ascii
 
 [theme]
-name = "light"          # dark | light
-selection = "#c8d8f0"   # bg, fg, selection, highlight, status, border, border_focus
+name = "light"          # dark | light | ocean | forest
+selection = "#c8d8f0"   # bg, fg, selection, selection_fg, accent, highlight, status, border, border_focus
 
 [theme.protocols]
 tcp = "#c8a2ff"         # tcp udp arp icmp dns http malformed other
@@ -284,8 +297,6 @@ Adım adım rehber: [`docs/NEW_DISSECTOR.md`](docs/NEW_DISSECTOR.md).
   bağlantı katmanı. Wi-Fi monitor mode (radiotap) ayrıştırılmaz.
 - Dissector'lar port ve içerik sezgisine dayanır. Standart dışı portlardaki
   protokoller tanınmayabilir; "decode as" yoktur.
-- Yardım penceresi (`?`) varsayılan tuşları gösterir, config'teki atamaları
-  yansıtmaz.
 - `--help` Türkçedir ama clap'in kendi hata mesajları (ör. bilinmeyen bayrak)
   İngilizce kalır.
 

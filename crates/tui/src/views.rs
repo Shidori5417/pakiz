@@ -8,13 +8,18 @@ use std::time::{Duration, Instant};
 use pakiz_flow::{render_ascii, Chunk, Conversation, Dir, Proto, Stream, StreamId, TcpState};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
+use ratatui::symbols;
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Sparkline, Table, Tabs};
+use ratatui::text::Span;
+use ratatui::widgets::{
+    Axis, Block, Cell, Chart, Dataset, GraphType, LineGauge, Paragraph, Row, Sparkline, Table, Tabs,
+};
 use ratatui::Frame;
 
 use crate::analyzer::Analyzer;
 use crate::app::App;
 use crate::theme::Theme;
+use crate::ui::panel_block;
 
 /// Etkin görünüm (üst sekme çubuğu).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -317,15 +322,14 @@ fn state_name(s: Option<TcpState>) -> &'static str {
     }
 }
 
-fn titled<'a>(title: impl Into<Line<'a>>, theme: &Theme) -> Block<'a> {
-    Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.border_focus))
-        .title(title)
+fn titled<'a>(title: impl Into<String>, theme: &Theme) -> Block<'a> {
+    panel_block(title, true, theme)
 }
 
-fn header_style() -> Style {
-    Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+fn header_style(theme: &Theme) -> Style {
+    Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD)
 }
 
 #[allow(clippy::cast_precision_loss)]
@@ -638,7 +642,10 @@ pub(crate) fn draw_conversations(f: &mut Frame, app: &mut App, area: Rect) {
                 Proto::Udp => theme.udp,
             });
             if i == sel {
-                st = st.bg(theme.selected_bg).add_modifier(Modifier::BOLD);
+                st = Style::default()
+                    .fg(theme.selected_fg)
+                    .bg(theme.selected_bg)
+                    .add_modifier(Modifier::BOLD);
             }
             Row::new(vec![
                 Cell::from(c.stream.index.to_string()),
@@ -673,7 +680,7 @@ pub(crate) fn draw_conversations(f: &mut Frame, app: &mut App, area: Rect) {
         mark(ConvSort::Duration, "Süre"),
         "Durum".into(),
     ])
-    .style(header_style());
+    .style(header_style(theme));
     let widths = [
         Constraint::Length(6),
         Constraint::Length(5),
@@ -716,7 +723,7 @@ pub(crate) fn draw_stats(f: &mut Frame, app: &mut App, area: Rect) {
     } = app;
     let st = &analyzer.stats;
     let [graphs, tabs, table] = Layout::vertical([
-        Constraint::Length(7),
+        Constraint::Length(10),
         Constraint::Length(1),
         Constraint::Min(3),
     ])
@@ -725,48 +732,47 @@ pub(crate) fn draw_stats(f: &mut Frame, app: &mut App, area: Rect) {
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(graphs);
     let (avg_p, avg_b) = st.average();
     let peak = st.peak();
-    for (r, series, title, color) in [
-        (
-            g1,
-            st.pps_series(),
-            format!(
-                " Paket/sn — son {} · tepe {} · ort {avg_p:.1} ",
-                st.pps_series().last().copied().unwrap_or(0),
-                peak.packets
-            ),
-            theme.udp,
+    let (pps, bps) = (st.pps_series(), st.bps_series());
+    stat_chart(
+        f,
+        g1,
+        &pps,
+        format!(
+            " Paket/sn — son {} · tepe {} · ort {avg_p:.1} ",
+            pps.last().copied().unwrap_or(0),
+            peak.packets
         ),
-        (
-            g2,
-            st.bps_series(),
-            format!(
-                " Bayt/sn — son {} · tepe {} · ort {}/s ",
-                fmt_bytes(st.bps_series().last().copied().unwrap_or(0)),
-                fmt_bytes(peak.bytes),
-                fmt_bytes(avg_b as u64)
-            ),
-            theme.tcp,
+        theme.udp,
+        |v| v.to_string(),
+        theme,
+    );
+    stat_chart(
+        f,
+        g2,
+        &bps,
+        format!(
+            " Bayt/sn — son {} · tepe {} · ort {}/s ",
+            fmt_bytes(bps.last().copied().unwrap_or(0)),
+            fmt_bytes(peak.bytes),
+            fmt_bytes(avg_b as u64)
         ),
-    ] {
-        let w = usize::from(r.width.saturating_sub(2));
-        let tail = &series[series.len().saturating_sub(w)..];
-        f.render_widget(
-            Sparkline::default()
-                .block(titled(title, theme))
-                .data(tail)
-                .style(Style::default().fg(color)),
-            r,
-        );
-    }
+        theme.tcp,
+        fmt_bytes,
+        theme,
+    );
     let idx = StatsTab::ALL.iter().position(|&t| t == sv.tab).unwrap_or(0);
     f.render_widget(
         Tabs::new(StatsTab::ALL.iter().map(|t| t.title()))
             .select(idx)
             .highlight_style(
                 Style::default()
-                    .fg(theme.border_focus)
-                    .add_modifier(Modifier::BOLD | Modifier::REVERSED),
-            ),
+                    .fg(theme.badge_fg)
+                    .bg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .style(Style::default().fg(theme.dim))
+            .padding(" ", " ")
+            .divider(Span::styled("│", Style::default().fg(theme.border))),
         tabs,
     );
 
@@ -882,6 +888,12 @@ pub(crate) fn draw_stats(f: &mut Frame, app: &mut App, area: Rect) {
                 .collect(),
         ),
     };
+    let (table, dist) = if table.width >= 100 {
+        let [t, d] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(36)]).areas(table);
+        (t, Some(d))
+    } else {
+        (table, None)
+    };
     let visible = usize::from(table.height.saturating_sub(3));
     sv.rows = rows.len();
     sv.height = visible.max(1);
@@ -893,17 +905,126 @@ pub(crate) fn draw_stats(f: &mut Frame, app: &mut App, area: Rect) {
         .take(visible)
         .map(|r| Row::new(r.into_iter().map(Cell::from)));
     let title = format!(
-        " {} — {n} satır · toplam {} paket, {} (Tab/1-4 sekme, j/k kaydır) ",
+        " {} — {n} satır · toplam {} paket, {} ",
         sv.tab.title(),
         total.packets,
         fmt_bytes(total.bytes)
     );
     f.render_widget(
         Table::new(body, widths)
-            .header(Row::new(header).style(header_style()))
+            .header(Row::new(header).style(header_style(theme)))
             .block(titled(title, theme)),
         table,
     );
+    if let Some(d) = dist {
+        draw_distribution(f, d, st, theme);
+    }
+}
+
+/// `1:30` / `45s`.
+fn fmt_secs(n: usize) -> String {
+    if n >= 60 {
+        format!("{}:{:02}", n / 60, n % 60)
+    } else {
+        format!("{n}s")
+    }
+}
+
+/// Eksenli çizgi grafik; dar alanda sparkline'a düşer.
+#[allow(clippy::cast_precision_loss, clippy::too_many_arguments)]
+fn stat_chart(
+    f: &mut Frame,
+    r: Rect,
+    series: &[u64],
+    title: String,
+    color: ratatui::style::Color,
+    fmt_y: fn(u64) -> String,
+    theme: &Theme,
+) {
+    if r.width < 36 || r.height < 7 {
+        let w = usize::from(r.width.saturating_sub(2));
+        let tail = &series[series.len().saturating_sub(w)..];
+        f.render_widget(
+            Sparkline::default()
+                .block(titled(title, theme))
+                .data(tail)
+                .style(Style::default().fg(color)),
+            r,
+        );
+        return;
+    }
+    // Y etiketleri + kenarlık için pay bırak; yalnızca çizilebilir genişlik kadar nokta.
+    let plot_w = usize::from(r.width.saturating_sub(12)).max(2);
+    let tail = &series[series.len().saturating_sub(plot_w)..];
+    let n = tail.len();
+    let data: Vec<(f64, f64)> = tail
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| (i as f64, v as f64))
+        .collect();
+    let max = tail.iter().copied().max().unwrap_or(0).max(1);
+    let dim = Style::default().fg(theme.dim);
+    let x_labels = vec![
+        format!("-{}", fmt_secs(n.saturating_sub(1))),
+        format!("-{}", fmt_secs(n.saturating_sub(1) / 2)),
+        "şimdi".to_owned(),
+    ];
+    let y_labels = vec!["0".to_owned(), fmt_y(max / 2), fmt_y(max)];
+    f.render_widget(
+        Chart::new(vec![Dataset::default()
+            .marker(symbols::Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(color))
+            .data(&data)])
+        .block(titled(title, theme))
+        .x_axis(
+            Axis::default()
+                .bounds([0.0, n.saturating_sub(1).max(1) as f64])
+                .labels(x_labels)
+                .style(dim),
+        )
+        .y_axis(
+            Axis::default()
+                .bounds([0.0, max as f64 * 1.1])
+                .labels(y_labels)
+                .style(dim),
+        ),
+        r,
+    );
+}
+
+/// Protokol dağılımı: bayt payına göre yatay oran çubukları + yüzde.
+#[allow(clippy::cast_precision_loss)]
+fn draw_distribution(f: &mut Frame, area: Rect, st: &pakiz_stats::Stats, theme: &Theme) {
+    let dist = st.protocol_distribution();
+    let total: u64 = dist.iter().map(|(_, c)| c.bytes).sum();
+    let block = titled(" Protokol dağılımı (bayt) ", theme);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    for (i, (name, c)) in dist.iter().take(usize::from(inner.height)).enumerate() {
+        let ratio = if total == 0 {
+            0.0
+        } else {
+            c.bytes as f64 / total as f64
+        };
+        let color = theme.badge_color(name, false);
+        let row = Rect::new(
+            inner.x,
+            inner.y + u16::try_from(i).unwrap_or(0),
+            inner.width,
+            1,
+        );
+        f.render_widget(
+            LineGauge::default()
+                .ratio(ratio)
+                .label(format!("{name:<7}{:>5.1}% ", ratio * 100.0))
+                .filled_symbol("━")
+                .unfilled_symbol("─")
+                .filled_style(Style::default().fg(color))
+                .unfilled_style(Style::default().fg(theme.border)),
+            row,
+        );
+    }
 }
 
 #[cfg(test)]

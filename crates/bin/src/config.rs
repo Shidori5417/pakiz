@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use pakiz_tui::{
-    catalog, format_color, format_key, parse_color, parse_key, Action, ColorRule, Key, Keymap,
-    PacketStore, Theme,
+    catalog, format_color, format_key, parse_color, parse_key, Action, ColorRule, IconSet, Key,
+    Keymap, PacketStore, Theme,
 };
 use ratatui::style::Color;
 use serde::Deserialize;
@@ -39,6 +39,8 @@ pub struct General {
     pub resolve_names: bool,
     /// Canlı yakalamada yeni paketlere otomatik kaydır.
     pub autoscroll: bool,
+    /// Simge ailesi: `unicode` | `nerd` | `ascii`.
+    pub icons: String,
 }
 
 impl Default for General {
@@ -49,6 +51,7 @@ impl Default for General {
             fps: 30,
             resolve_names: false,
             autoscroll: true,
+            icons: IconSet::default().name().to_owned(),
         }
     }
 }
@@ -60,6 +63,8 @@ struct ThemeCfg {
     bg: Option<Spanned<String>>,
     fg: Option<Spanned<String>>,
     selection: Option<Spanned<String>>,
+    selection_fg: Option<Spanned<String>>,
+    accent: Option<Spanned<String>>,
     highlight: Option<Spanned<String>>,
     status: Option<Spanned<String>>,
     border: Option<Spanned<String>>,
@@ -78,6 +83,8 @@ struct ColoringCfg {
 /// Çözülmüş ayarlar.
 pub struct Settings {
     pub general: General,
+    /// `general.icons` çözülmüş hali.
+    pub icons: IconSet,
     pub theme: Theme,
     pub keymap: Keymap,
     /// Config'teki `[[coloring]]` kuralları (temanın varsayılanlarından önce denenir).
@@ -199,11 +206,19 @@ pub fn parse(text: &str, name: &str, theme_override: Option<&str>) -> Result<Set
         return Err(anyhow!("{name}: general.max_packets en az 1 olmalı"));
     }
 
+    let icons = IconSet::from_name(&g.icons).ok_or_else(|| {
+        anyhow!(
+            "{name}: general.icons bilinmiyor: {:?} (geçerli: {})",
+            g.icons,
+            IconSet::NAMES.join(", ")
+        )
+    })?;
     let theme = build_theme(&cfg.theme, name, text, theme_override)?;
     let keymap = build_keys(&cfg.keys, name, text)?;
     let coloring = build_coloring(&cfg.coloring, name, text)?;
     Ok(Settings {
         general: cfg.general,
+        icons,
         theme,
         keymap,
         coloring,
@@ -238,6 +253,8 @@ fn build_theme(
         (&mut theme.bg, &t.bg),
         (&mut theme.fg, &t.fg),
         (&mut theme.selected_bg, &t.selection),
+        (&mut theme.selected_fg, &t.selection_fg),
+        (&mut theme.accent, &t.accent),
         (&mut theme.hex_highlight_bg, &t.highlight),
         (&mut theme.status_bg, &t.status),
         (&mut theme.border, &t.border),
@@ -361,6 +378,8 @@ pub fn dump() -> String {
          resolve_names = {}\n\
          # Canlı yakalamada yeni paketlere otomatik kaydır (TUI'de `a`).\n\
          autoscroll = {}\n\
+         # Simge ailesi: {}. `nerd` Nerd Font gerektirir; `ascii` yalnızca düz karakter kullanır.\n\
+         icons = \"{}\"\n\
          \n\
          [theme]\n\
          # Yerleşik temalar: {}. Aşağıdaki renkler temanın üstüne yazılır.\n\
@@ -370,12 +389,16 @@ pub fn dump() -> String {
         g.fps,
         g.resolve_names,
         g.autoscroll,
+        IconSet::NAMES.join(" | "),
+        g.icons,
         Theme::NAMES.join(", ")
     );
     for (k, c) in [
         ("bg", t.bg),
         ("fg", t.fg),
         ("selection", t.selected_bg),
+        ("selection_fg", t.selected_fg),
+        ("accent", t.accent),
         ("highlight", t.hex_highlight_bg),
         ("status", t.status_bg),
         ("border", t.border),
@@ -518,6 +541,54 @@ fg = "#00ff00"
         // --theme dosyadakini ezer.
         let s = parse("[theme]\nname = \"light\"", "t", Some("dark")).unwrap();
         assert_eq!(s.theme.tcp, Theme::dark().tcp);
+    }
+
+    #[test]
+    fn icons_and_new_themes() {
+        assert_eq!(parse("", "x", None).unwrap().icons, IconSet::Unicode);
+        let s = parse("[general]\nicons = \"nerd\"\n", "x", None).unwrap();
+        assert_eq!((s.icons, s.general.icons.as_str()), (IconSet::Nerd, "nerd"));
+        assert_eq!(
+            parse("[general]\nicons = \"ASCII\"\n", "x", None)
+                .unwrap()
+                .icons,
+            IconSet::Ascii
+        );
+        let e = parse("[general]\nicons = \"emoji\"\n", "c.toml", None)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            e.contains("general.icons") && e.contains("unicode, nerd, ascii"),
+            "{e}"
+        );
+        for (name, accent) in [
+            ("ocean", Theme::ocean().accent),
+            ("forest", Theme::forest().accent),
+        ] {
+            let s = parse(&format!("[theme]\nname = \"{name}\"\n"), "x", None).unwrap();
+            assert_eq!(s.theme.accent, accent, "{name}");
+        }
+        assert_eq!(
+            parse("", "x", Some("ocean")).unwrap().theme.bg,
+            Theme::ocean().bg
+        );
+        let s = parse(
+            "[theme]\naccent = \"#ff00ff\"\nselection_fg = \"black\"\n",
+            "x",
+            None,
+        )
+        .unwrap();
+        assert_eq!(s.theme.accent, Color::Rgb(255, 0, 255));
+        assert_eq!(s.theme.selected_fg, Color::Black);
+        // Yeni eylemler config'ten değiştirilebilir.
+        let s = parse("[keys]\nzoom = [\"Z\"]\ngrow = [\"=\"]\n", "x", None).unwrap();
+        let k = |c| s.keymap.action(&KeyEvent::new(c, KeyModifiers::NONE));
+        assert_eq!(k(KeyCode::Char('Z')), Some(Action::Zoom));
+        assert_eq!(k(KeyCode::Char('z')), None);
+        assert_eq!(k(KeyCode::Char('=')), Some(Action::Grow));
+        assert_eq!(k(KeyCode::Char('L')), Some(Action::ToggleLayout));
+        assert_eq!(k(KeyCode::Char('-')), Some(Action::Shrink));
     }
 
     fn err(text: &str) -> String {

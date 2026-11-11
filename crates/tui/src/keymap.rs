@@ -39,11 +39,19 @@ pub enum Action {
     Sort,
     /// İstatistik: alt sekme (0 tabanlı).
     SelectTab(u8),
+    /// Odaklı paneli büyüt / geri al.
+    Zoom,
+    /// Dikey ↔ yatay düzen.
+    ToggleLayout,
+    /// Odaklı paneli büyüt (panel oranı).
+    Grow,
+    /// Odaklı paneli küçült (panel oranı).
+    Shrink,
 }
 
 impl Action {
     /// Config'teki (`[keys]`) adlarıyla tüm eylemler, yardım sırasıyla.
-    pub const ALL: [(&'static str, Action); 27] = [
+    pub const ALL: [(&'static str, Action); 31] = [
         ("down", Action::Down),
         ("up", Action::Up),
         ("top", Action::Top),
@@ -71,6 +79,10 @@ impl Action {
         ("tab2", Action::SelectTab(1)),
         ("tab3", Action::SelectTab(2)),
         ("tab4", Action::SelectTab(3)),
+        ("zoom", Action::Zoom),
+        ("toggle_layout", Action::ToggleLayout),
+        ("grow", Action::Grow),
+        ("shrink", Action::Shrink),
     ];
 
     /// Config adından eylem (`"half_page_down"` → [`Action::HalfPageDown`]).
@@ -251,6 +263,10 @@ impl Default for Keymap {
             ((K::Char('2'), n), A::SelectTab(1)),
             ((K::Char('3'), n), A::SelectTab(2)),
             ((K::Char('4'), n), A::SelectTab(3)),
+            ((K::Char('z'), n), A::Zoom),
+            ((K::Char('L'), n), A::ToggleLayout),
+            ((K::Char('+'), n), A::Grow),
+            ((K::Char('-'), n), A::Shrink),
         ]
         .into_iter()
         .collect();

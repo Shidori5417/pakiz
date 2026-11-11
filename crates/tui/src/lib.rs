@@ -5,7 +5,10 @@
 
 mod analyzer;
 mod app;
+mod chrome;
+mod icons;
 mod keymap;
+mod palette;
 mod source;
 mod store;
 mod theme;
@@ -32,14 +35,16 @@ use ratatui::Terminal;
 
 pub use analyzer::{catalog, Analyzed, Analyzer};
 pub use app::{
-    App, Completion, FilterState, InputKind, InputLine, Panel, ANALYZE_BATCH, DRAIN_BATCH,
-    FILTER_BATCH, INDEX_BATCH,
+    App, Completion, FilterState, InputKind, InputLine, LayoutState, Panel, Toast, ToastKind,
+    ANALYZE_BATCH, DRAIN_BATCH, FILTER_BATCH, INDEX_BATCH, TOAST_TTL,
 };
+pub use icons::IconSet;
 pub use keymap::{format_key, parse_key, Action, Key, Keymap};
+pub use palette::{candidates as palette_candidates, Candidate, COMMANDS};
 pub use source::{PacketSource, VecSource};
 pub use store::{Entry, PacketStore};
 pub use theme::{format_color, parse_color, ColorRule, Theme};
-pub use tree::{flatten, highlight_range, TreeRow};
+pub use tree::{flatten, guide_prefixes, highlight_range, TreeRow};
 pub use ui::{draw, hex_line};
 pub use views::{fmt_bytes, ConvSort, ConvView, FollowMode, FollowView, StatsTab, StatsView, View};
 
@@ -148,8 +153,8 @@ impl Tui {
                 break;
             }
             dirty |= app.ingest();
-            if last_status.elapsed() >= Duration::from_secs(1) {
-                // Düşen paket sayacı gibi kaynak istatistikleri için.
+            if last_status.elapsed() >= Duration::from_millis(250) {
+                // Düşen sayaç, geçen süre, yanıp sönme ve spinner için seyrek yenileme.
                 dirty = true;
                 last_status = Instant::now();
             }

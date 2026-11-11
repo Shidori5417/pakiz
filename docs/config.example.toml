@@ -13,18 +13,22 @@ fps = 30
 resolve_names = false
 # Canlı yakalamada yeni paketlere otomatik kaydır (TUI'de `a`).
 autoscroll = true
+# Simge ailesi: unicode | nerd | ascii. `nerd` Nerd Font gerektirir; `ascii` yalnızca düz karakter kullanır.
+icons = "unicode"
 
 [theme]
-# Yerleşik temalar: dark, light. Aşağıdaki renkler temanın üstüne yazılır.
+# Yerleşik temalar: dark, light, ocean, forest. Aşağıdaki renkler temanın üstüne yazılır.
 # Renk: "#rrggbb", ad (red, green, darkgray, reset...) veya 256 renk indeksi.
 name = "dark"
 # bg = "reset"
 # fg = "reset"
-# selection = "darkgray"
-# highlight = "blue"
+# selection = "#343d5e"
+# selection_fg = "#ffffff"
+# accent = "#56c8e8"
+# highlight = "#2f5fb0"
 # status = "#303040"
-# border = "gray"
-# border_focus = "cyan"
+# border = "#6c7293"
+# border_focus = "#56c8e8"
 
 # Protokol satır renkleri (varsayılan renklendirme kuralları bunları kullanır).
 [theme.protocols]
@@ -69,6 +73,10 @@ tab1 = ["1"]
 tab2 = ["2"]
 tab3 = ["3"]
 tab4 = ["4"]
+zoom = ["z"]
+toggle_layout = ["L"]
+grow = ["+"]
+shrink = ["-"]
 
 # Renklendirme kuralları (Wireshark coloring rules gibi): display filter ile,
 # sırayla denenir, ilk eşleşen satırın rengini belirler. Buradakiler temanın

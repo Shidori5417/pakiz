@@ -109,7 +109,7 @@ struct Cli {
     /// Sonda özet istatistik yaz (protokol dağılımı, top talkers); TUI açılmaz
     #[arg(long, conflicts_with = "count")]
     stats: bool,
-    /// Renk teması: dark, light (config: theme.name)
+    /// Renk teması: dark, light, ocean, forest (config: theme.name)
     #[arg(long, value_name = "AD")]
     theme: Option<String>,
     #[arg(
@@ -632,6 +632,7 @@ fn apply_settings(
     settings: config::Settings,
 ) -> Result<()> {
     app.keymap = settings.keymap;
+    app.icons = settings.icons;
     app.set_theme(settings.theme, settings.coloring)
         .map_err(|e| anyhow::anyhow!("yerleşik renklendirme kuralı derlenemedi: {}", e.msg))?;
     app.resolve_names = cli.resolve;

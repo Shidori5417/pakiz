@@ -1,57 +1,40 @@
-//! Çizim: üç panel, giriş satırı, durum çubuğu, yardım penceresi.
+//! Çizim: paneller (liste, katman ağacı, hex) ve ekran iskeleti. Üst çubuk,
+//! durum çubuğu, bildirim, palet ve yardım [`crate::chrome`] içindedir.
 
 use std::ops::Range;
 
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Margin, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Tabs};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation,
+    ScrollbarState, Table,
+};
 use ratatui::Frame;
 
-use crate::app::{App, FilterState, InputKind, InputLine, Panel};
+use crate::app::{App, Panel};
+use crate::chrome;
+use crate::icons::IconSet;
 use crate::theme::{ColorRule, Theme};
-use crate::tree::highlight_range;
+use crate::tree::{guide_prefixes, highlight_range};
 use crate::views::{draw_conversations, draw_follow, draw_stats, View};
 
-const HELP: &[(&str, &str)] = &[
-    ("j / k, ↓ / ↑", "aşağı / yukarı"),
-    ("g / G", "baş / son"),
-    ("Ctrl-d / Ctrl-u", "yarım sayfa"),
-    ("Tab", "panel odağı"),
-    ("Enter / Space", "ağaçta aç/kapa"),
-    ("h / l, ← / →", "kapa / aç"),
-    ("p", "duraklat / devam"),
-    ("a", "otomatik kaydırma"),
-    ("/", "filtre (Tab tamamla, ↑/↓ geçmiş)"),
-    (":", "komut (:q :w dosya :follow :conv :stats)"),
-    ("F", "seçili akışı izle (Follow Stream)"),
-    ("c", "konuşmalar tablosu"),
-    ("S", "istatistikler (grafik + tablolar)"),
-    ("n", "DNS ad çözümleme aç/kapa"),
-    ("m", "Follow: ASCII / Hex / Raw"),
-    ("s", "Konuşmalar: sıralama sütunu"),
-    ("Enter", "Konuşmalar: akışa filtrele"),
-    ("Tab / 1-4", "İstatistik: alt sekme"),
-    ("Esc / q", "görünümden geri"),
-    ("?", "bu yardım"),
-    ("q", "çıkış (ana listede)"),
-    ("fare", "tıkla: seç, tekerlek: kaydır"),
-];
-
-fn block<'a>(title: &'a str, focused: bool, theme: &Theme) -> Block<'a> {
-    let color = if focused {
-        theme.border_focus
+/// Yuvarlak köşeli panel bloğu: odaklıysa vurgu renginde ve kalın, değilse soluk.
+pub(crate) fn panel_block<'a>(title: impl Into<String>, focused: bool, theme: &Theme) -> Block<'a> {
+    let (color, mods) = if focused {
+        (theme.border_focus, Modifier::BOLD)
     } else {
-        theme.border
+        (theme.border, Modifier::empty())
     };
-    let mut style = Style::default().fg(color);
-    if focused {
-        style = style.add_modifier(Modifier::BOLD);
-    }
+    let title_color = if focused { theme.accent } else { theme.dim };
     Block::default()
         .borders(Borders::ALL)
-        .border_style(style)
-        .title(title)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(color).add_modifier(mods))
+        .title(Line::styled(
+            title.into(),
+            Style::default().fg(title_color).add_modifier(mods),
+        ))
 }
 
 /// `offset`'i `sel` görünür kalacak biçimde ayarlar.
@@ -66,10 +49,49 @@ fn keep_visible(offset: &mut usize, sel: usize, height: usize) {
     }
 }
 
+/// Panelin sağ kenarına kaydırma çubuğu (içerik sığmıyorsa).
+fn scrollbar(
+    f: &mut Frame,
+    area: Rect,
+    total: usize,
+    visible: usize,
+    offset: usize,
+    icons: IconSet,
+    theme: &Theme,
+) {
+    if visible == 0 || total <= visible {
+        return;
+    }
+    let (track, thumb) = icons.scroll();
+    let mut state = ScrollbarState::new(total - visible)
+        .position(offset.min(total - visible))
+        .viewport_content_length(visible);
+    f.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some(track))
+            .thumb_symbol(thumb)
+            .track_style(Style::default().fg(theme.border))
+            .thumb_style(Style::default().fg(theme.accent)),
+        area.inner(Margin {
+            vertical: 1,
+            horizontal: 0,
+        }),
+        &mut state,
+    );
+}
+
+/// Spinner için ~8 Hz'lik tik.
+fn tick(app: &App) -> u64 {
+    u64::try_from(app.started.elapsed().as_millis() / 120).unwrap_or(0)
+}
+
 /// Tüm ekranı çizer.
 pub fn draw(f: &mut Frame, app: &mut App) {
     let input_h = u16::from(app.input.is_some());
-    let [tabs, body, input, status] = Layout::vertical([
+    let [header, tabs, body, input, status] = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(4),
         Constraint::Length(input_h),
@@ -80,136 +102,111 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Block::default().style(Style::default().fg(app.theme.fg).bg(app.theme.bg)),
         f.area(),
     );
-    draw_tabs(f, app, tabs);
+    chrome::draw_header(f, app, header);
+    chrome::draw_tabs(f, app, tabs);
     match app.view {
-        View::Packets => {
-            let [list, tree, hex] = Layout::vertical([
-                Constraint::Percentage(45),
-                Constraint::Percentage(30),
-                Constraint::Min(4),
-            ])
-            .areas(body);
-            app.areas.list = list;
-            app.areas.tree = tree;
-            app.areas.hex = hex;
-            draw_list(f, app, list);
-            draw_tree(f, app, tree);
-            draw_hex(f, app, hex);
-        }
+        View::Packets => draw_packets(f, app, body),
         View::Follow => draw_follow(f, app, body),
         View::Conversations => draw_conversations(f, app, body),
         View::Stats => draw_stats(f, app, body),
     }
     if let Some(inp) = &app.input {
-        f.render_widget(input_line(inp, &app.theme), input);
+        f.render_widget(chrome::input_line(inp, &app.theme), input);
     }
-    draw_status(f, app, status);
-    draw_completion(f, app, input);
+    chrome::draw_status(f, app, status);
+    if app.completion.is_none() {
+        chrome::draw_filter_error(f, app, input);
+    }
+    chrome::draw_palette(f, app, input);
+    chrome::draw_completion(f, app, input);
+    chrome::draw_toast(f, app, body);
     if app.show_help {
-        draw_help(f, &app.theme);
+        chrome::draw_help(f, app);
     }
 }
 
-/// Üst sekme çubuğu: görünümler.
-fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
-    let idx = View::ALL.iter().position(|&v| v == app.view).unwrap_or(0);
-    f.render_widget(
-        Tabs::new(View::ALL.iter().map(|v| v.title()))
-            .select(idx)
-            .style(Style::default().bg(app.theme.status_bg))
-            .highlight_style(
-                Style::default()
-                    .fg(app.theme.border_focus)
-                    .add_modifier(Modifier::BOLD | Modifier::REVERSED),
-            ),
-        area,
-    );
-}
-
-/// Giriş satırı. Filtrede arka plan geçerliyse yeşil, hatalıysa kırmızı; hata
-/// aralığının altı çizilir.
-fn input_line<'a>(inp: &'a InputLine, theme: &Theme) -> Paragraph<'a> {
-    let prefix = match inp.kind {
-        InputKind::Filter => "/",
-        InputKind::Command => ":",
-    };
-    let t = inp.text.as_str();
-    let mut spans = vec![Span::raw(prefix)];
-    let mut bg = Style::default();
-    let mut cursor = Span::raw("█");
-    if inp.kind == InputKind::Filter {
-        match &inp.state {
-            FilterState::Empty => {}
-            FilterState::Valid => bg = bg.bg(theme.filter_ok_bg),
-            FilterState::Invalid(e) => {
-                bg = bg.bg(theme.filter_err_bg);
-                let err = Style::default()
-                    .fg(ratatui::style::Color::Yellow)
-                    .add_modifier(Modifier::UNDERLINED | Modifier::BOLD);
-                let s = e.span.start.min(t.len());
-                let end = e.span.end.clamp(s, t.len());
-                if let (Some(a), Some(m), Some(b)) = (t.get(..s), t.get(s..end), t.get(end..)) {
-                    spans.push(Span::raw(a));
-                    spans.push(Span::styled(m, err));
-                    spans.push(Span::raw(b));
-                    if s == end {
-                        // Boş aralık (ör. eksik değer): imleci işaretle.
-                        cursor = Span::styled("█", err);
-                    }
-                } else {
-                    spans.push(Span::raw(t));
-                }
-            }
+/// Paket görünümü: düzene (dikey/yatay/zoom) göre üç panel.
+fn draw_packets(f: &mut Frame, app: &mut App, body: Rect) {
+    let l = app.layout;
+    let none = Rect::default();
+    let (list, tree, hex) = if l.zoom {
+        match app.focus {
+            Panel::List => (body, none, none),
+            Panel::Tree => (none, body, none),
+            Panel::Hex => (none, none, body),
         }
+    } else if l.horizontal {
+        let [top, bottom] = Layout::vertical([
+            Constraint::Percentage(l.split),
+            Constraint::Percentage(100 - l.split),
+        ])
+        .areas(body);
+        // Hex satırı 72 sütun sürer; dar terminalde alanın yarısından azına düşmez.
+        let hex_w = 74.min(bottom.width * 2 / 3).max(bottom.width / 2);
+        let [tree, hex] =
+            Layout::horizontal([Constraint::Fill(1), Constraint::Length(hex_w)]).areas(bottom);
+        (top, tree, hex)
+    } else {
+        let rest = (100 - l.split) * 55 / 100;
+        let [list, tree, hex] = Layout::vertical([
+            Constraint::Percentage(l.split),
+            Constraint::Percentage(rest),
+            Constraint::Min(4),
+        ])
+        .areas(body);
+        (list, tree, hex)
+    };
+    app.areas.list = list;
+    app.areas.tree = tree;
+    app.areas.hex = hex;
+    if list.area() > 0 {
+        draw_list(f, app, list);
     }
-    if spans.len() == 1 {
-        spans.push(Span::raw(t));
+    if tree.area() > 0 {
+        draw_tree(f, app, tree);
     }
-    spans.push(cursor);
-    Paragraph::new(Line::from(spans)).style(bg)
+    if hex.area() > 0 {
+        draw_hex(f, app, hex);
+    }
 }
 
-/// Birden çok tamamlama adayı varsa giriş satırının üstünde açılır liste.
-fn draw_completion(f: &mut Frame, app: &App, input: Rect) {
-    const MAX: usize = 8;
-    let Some(comp) = &app.completion else {
+/// Boş liste: ortalanmış mesaj (+ canlıysa spinner).
+fn draw_empty(f: &mut Frame, app: &App, area: Rect) {
+    let inner = area.inner(Margin::new(1, 1));
+    if inner.height == 0 {
         return;
+    }
+    let (text, spin) = if !app.filter_text.is_empty() && app.store.total() > 0 {
+        if app.filter_progress().is_some() {
+            ("Filtreleniyor".to_owned(), true)
+        } else {
+            ("Filtreyle eşleşen paket yok".to_owned(), false)
+        }
+    } else {
+        (
+            format!("Paket bekleniyor{}", app.icons.ellipsis()),
+            app.is_live(),
+        )
     };
-    let sel = comp.index.unwrap_or(0);
-    let skip = (sel + 1).saturating_sub(MAX);
-    let shown = comp.candidates.len().min(MAX);
-    let h = u16::try_from(shown + 2).unwrap_or(u16::MAX).min(input.y);
-    let w = comp
-        .candidates
-        .iter()
-        .map(|n| n.len())
-        .max()
-        .unwrap_or(0)
-        .saturating_add(4);
-    let w = u16::try_from(w).unwrap_or(u16::MAX).min(input.width);
-    let popup = Rect::new(input.x, input.y - h, w, h);
-    let lines: Vec<Line> = comp
-        .candidates
-        .iter()
-        .enumerate()
-        .skip(skip)
-        .take(MAX)
-        .map(|(i, n)| {
-            let mut st = Style::default();
-            if comp.index == Some(i) {
-                st = st.bg(app.theme.selected_bg).add_modifier(Modifier::BOLD);
-            }
-            Line::styled(*n, st)
-        })
-        .collect();
-    let title = format!(" {} aday ", comp.candidates.len());
-    f.render_widget(Clear, popup);
+    let line = if spin {
+        Line::from(vec![
+            Span::styled(
+                format!("{} ", app.icons.spinner(tick(app))),
+                Style::default().fg(app.theme.accent),
+            ),
+            Span::styled(text, Style::default().fg(app.theme.dim)),
+        ])
+    } else {
+        Line::styled(text, Style::default().fg(app.theme.dim))
+    };
+    let y = inner.y + inner.height / 2;
     f.render_widget(
-        Paragraph::new(lines).block(block(&title, true, &app.theme)),
-        popup,
+        Paragraph::new(line).alignment(Alignment::Center),
+        Rect::new(inner.x, y, inner.width, 1),
     );
 }
 
+#[allow(clippy::too_many_lines)]
 fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     let visible = usize::from(area.height.saturating_sub(3));
     if let Some(sel) = app.selected {
@@ -217,7 +214,20 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     }
     let max_off = app.displayed_len().saturating_sub(visible);
     app.list_offset = app.list_offset.min(max_off);
+    let focused = app.focus == Panel::List;
+    let title = format!(
+        " {}Paketler {}/{} ",
+        app.icons.title_packets(),
+        app.displayed_len(),
+        app.store.len()
+    );
+    if app.displayed_len() == 0 {
+        f.render_widget(panel_block(title, focused, &app.theme), area);
+        draw_empty(f, app, area);
+        return;
+    }
     let theme = &app.theme;
+    let icons = app.icons;
     let end = (app.list_offset + visible).min(app.displayed_len());
     let resolve = app.resolve_names;
     let an = &app.analyzer;
@@ -225,6 +235,7 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
         let e = app.store.get(app.store_index(i)?)?;
         let s = &e.summary;
         let flags = e.flow.map(|t| t.flags).unwrap_or_default();
+        let selected = Some(i) == app.selected;
         let mut style = if e.malformed {
             Style::default().fg(theme.malformed)
         } else {
@@ -235,9 +246,27 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
                 .find(|r| r.matches(&d, &e.raw))
                 .map_or_else(|| Style::default().fg(theme.other), ColorRule::style)
         };
-        if Some(i) == app.selected {
-            style = style.bg(theme.selected_bg).add_modifier(Modifier::BOLD);
+        let mut dim = Style::default().fg(theme.dim);
+        if selected {
+            // Seçimde yüksek kontrast: protokol rengi yalnızca sol çubukta/rozette kalır.
+            style = Style::default()
+                .fg(theme.selected_fg)
+                .bg(theme.selected_bg)
+                .add_modifier(Modifier::BOLD);
+            dim = Style::default().fg(theme.selected_fg);
+        } else if style.bg.is_none() && i % 2 == 1 {
+            style = style.bg(theme.zebra_bg);
         }
+        let proto = theme.badge_color(s.protocol, e.malformed);
+        let badge = Style::default()
+            .fg(theme.badge_fg)
+            .bg(proto)
+            .add_modifier(Modifier::BOLD);
+        let flag_color = if flags.has_warning() {
+            theme.warn
+        } else {
+            theme.danger
+        };
         let (src, dst) = if resolve {
             (an.resolve(&s.src).to_owned(), an.resolve(&s.dst).to_owned())
         } else {
@@ -245,38 +274,62 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
         };
         Some(
             Row::new(vec![
-                Cell::from(e.number.to_string()),
-                Cell::from(format!("{:.6}", app.store.rel_time(&e))),
+                Cell::from(icons.bar()).style(Style::default().fg(proto)),
+                Cell::from(icons.flag(flags)).style(Style::default().fg(flag_color)),
+                Cell::from(Line::from(e.number.to_string()).right_aligned()).style(dim),
+                Cell::from(format!("{:.6}", app.store.rel_time(&e))).style(dim),
                 Cell::from(src),
                 Cell::from(dst),
-                Cell::from(s.protocol),
-                Cell::from(s.len.to_string()),
-                Cell::from(e.process.clone().unwrap_or_default()),
+                Cell::from(Span::styled(format!(" {:<6} ", s.protocol), badge)),
+                Cell::from(Line::from(s.len.to_string()).right_aligned()),
+                Cell::from(e.process.clone().unwrap_or_default()).style(dim),
                 Cell::from(format!("{}{}", flags.info_prefix(), s.info)),
             ])
             .style(style),
         )
     });
     let header = Row::new([
-        "No", "Zaman", "Kaynak", "Hedef", "Protokol", "Uzunluk", "Süreç", "Bilgi",
+        Cell::from(""),
+        Cell::from(""),
+        Cell::from(Line::from("No").right_aligned()),
+        Cell::from("Zaman"),
+        Cell::from("Kaynak"),
+        Cell::from("Hedef"),
+        Cell::from("Protokol"),
+        Cell::from(Line::from("Uzunluk").right_aligned()),
+        Cell::from("Süreç"),
+        Cell::from("Bilgi"),
     ])
-    .style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED));
+    .style(
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD),
+    );
     let widths = [
+        Constraint::Length(1),
+        Constraint::Length(1),
         Constraint::Length(7),
         Constraint::Length(11),
-        Constraint::Length(22),
-        Constraint::Length(22),
+        Constraint::Length(18),
+        Constraint::Length(18),
         Constraint::Length(8),
         Constraint::Length(7),
-        Constraint::Length(12),
+        Constraint::Length(10),
         Constraint::Fill(1),
     ];
-    let table = Table::new(rows, widths).header(header).block(block(
-        " Paketler ",
-        app.focus == Panel::List,
-        theme,
-    ));
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(panel_block(title, focused, theme));
     f.render_widget(table, area);
+    scrollbar(
+        f,
+        area,
+        app.displayed_len(),
+        visible,
+        app.list_offset,
+        icons,
+        &app.theme,
+    );
 }
 
 fn draw_tree(f: &mut Frame, app: &mut App, area: Rect) {
@@ -286,41 +339,107 @@ fn draw_tree(f: &mut Frame, app: &mut App, area: Rect) {
     let mut offset = app.tree_offset;
     keep_visible(&mut offset, sel, visible);
     let theme = app.theme.clone();
-    let lines: Vec<Line> = match app.tree() {
-        Some((_, rows)) => rows
-            .iter()
-            .enumerate()
-            .skip(offset)
-            .take(visible)
-            .map(|(i, r)| {
-                let marker = match (r.has_children, r.expanded) {
-                    (false, _) => "  ",
-                    (true, false) => "▸ ",
-                    (true, true) => "▾ ",
-                };
-                let mut style = Style::default();
-                if r.malformed {
-                    style = style.fg(theme.malformed);
-                }
-                if i == sel {
-                    style = style.bg(theme.selected_bg).add_modifier(Modifier::BOLD);
-                }
-                Line::styled(
-                    format!("{}{marker}{}", "  ".repeat(r.depth), r.label),
-                    style,
-                )
-            })
-            .collect(),
-        None => vec![Line::from("(paket seçilmedi)")],
+    let icons = app.icons;
+    let guides = icons.guides();
+    let mut total = 0;
+    let (title, lines): (String, Vec<Line>) = match app.tree() {
+        Some((d, rows)) => {
+            total = rows.len();
+            let prefixes = guide_prefixes(rows, guides);
+            let range = rows
+                .get(sel)
+                .filter(|r| r.len > 0)
+                .map(|r| format!(" · bayt {}..{}", r.offset, r.offset + r.len))
+                .unwrap_or_default();
+            let title = format!(
+                " {}Katmanlar {}/{}{range} ",
+                icons.title_tree(),
+                sel.min(total.saturating_sub(1)) + 1,
+                total
+            );
+            let lines = rows
+                .iter()
+                .zip(&prefixes)
+                .enumerate()
+                .skip(offset)
+                .take(visible)
+                .map(|(i, (r, prefix))| {
+                    let marker = match (r.has_children, r.expanded) {
+                        (false, _) => "  ",
+                        (true, false) => icons.closed(),
+                        (true, true) => icons.open(),
+                    };
+                    let marker = if r.has_children {
+                        format!("{marker} ")
+                    } else {
+                        marker.to_owned()
+                    };
+                    let mut label_style = Style::default();
+                    let mut label = r.label.clone();
+                    if r.depth == 0 {
+                        let proto = r
+                            .path
+                            .first()
+                            .and_then(|&li| d.layers.get(li))
+                            .map_or("", |l| l.protocol);
+                        label_style = label_style
+                            .fg(theme.layer_color(proto))
+                            .add_modifier(Modifier::BOLD);
+                    }
+                    if r.malformed {
+                        label = format!("{} {label}", icons.warn());
+                        label_style = label_style.fg(theme.danger).add_modifier(Modifier::BOLD);
+                    }
+                    if i == sel && r.depth > 0 && !r.malformed {
+                        label_style = label_style
+                            .fg(theme.selected_fg)
+                            .add_modifier(Modifier::BOLD);
+                    }
+                    Line::from(vec![
+                        Span::styled(prefix.clone(), Style::default().fg(theme.border_focus)),
+                        Span::styled(marker, Style::default().fg(theme.accent)),
+                        Span::styled(label, label_style),
+                    ])
+                })
+                .collect();
+            (title, lines)
+        }
+        None => (
+            format!(" {}Katmanlar ", icons.title_tree()),
+            vec![Line::styled(
+                "(paket seçilmedi)",
+                Style::default().fg(theme.dim),
+            )],
+        ),
     };
     app.tree_offset = offset;
     f.render_widget(
-        Paragraph::new(lines).block(block(" Katmanlar ", focused, &theme)),
+        Paragraph::new(lines).block(panel_block(title, focused, &theme)),
         area,
     );
+    // Seçili satırın zemini tüm genişliğe yayılır.
+    if sel >= offset && sel < offset + visible && sel < total {
+        let y = area.y + 1 + u16::try_from(sel - offset).unwrap_or(0);
+        f.buffer_mut().set_style(
+            Rect::new(area.x + 1, y, area.width.saturating_sub(2), 1),
+            Style::default().bg(theme.selected_bg),
+        );
+    }
+    scrollbar(f, area, total, visible, offset, icons, &theme);
 }
 
-/// Tek hex satırı: ofset, 16 bayt hex, ASCII; `hl` aralığındaki baytlar vurgulu.
+/// Bayt sınıfına göre stil: 0x00 soluk, yazdırılabilir normal, kontrol / üst bayt ayrı ton.
+fn byte_style(b: u8, theme: &Theme) -> Style {
+    match b {
+        0 => Style::default().fg(theme.dim),
+        0x20..=0x7e => Style::default(),
+        0x80..=0xff => Style::default().fg(theme.hex_high),
+        _ => Style::default().fg(theme.hex_ctrl),
+    }
+}
+
+/// Tek hex satırı: ofset, 16 bayt hex, ASCII; `hl` aralığındaki baytlar vurgulu
+/// (hex ve ASCII'de aynı renkte).
 #[must_use]
 pub fn hex_line(
     data: &[u8],
@@ -331,21 +450,25 @@ pub fn hex_line(
     let start = line * 16;
     let end = (start + 16).min(data.len());
     let hl_style = Style::default()
+        .fg(theme.hex_highlight_fg)
         .bg(theme.hex_highlight_bg)
         .add_modifier(Modifier::BOLD);
     let is_hl = |i: usize| hl.is_some_and(|r| r.contains(&i));
     let mut spans = vec![Span::styled(
         format!("{start:04x}  "),
-        Style::default().fg(theme.border),
+        Style::default().fg(theme.dim),
     )];
     for i in start..start + 16 {
-        let text = data
-            .get(i)
-            .map_or_else(|| "  ".to_string(), |b| format!("{b:02x}"));
-        let style = if i < end && is_hl(i) {
-            hl_style
-        } else {
-            Style::default()
+        let (text, style) = match data.get(i) {
+            Some(&b) if i < end => (
+                format!("{b:02x}"),
+                if is_hl(i) {
+                    hl_style
+                } else {
+                    byte_style(b, theme)
+                },
+            ),
+            _ => ("  ".to_string(), Style::default()),
         };
         spans.push(Span::styled(text, style));
         spans.push(Span::raw(if i - start == 7 { "  " } else { " " }));
@@ -357,7 +480,13 @@ pub fn hex_line(
         } else {
             '.'
         };
-        let style = if is_hl(i) { hl_style } else { Style::default() };
+        let style = if is_hl(i) {
+            hl_style
+        } else if b.is_ascii_graphic() || b == b' ' {
+            Style::default()
+        } else {
+            byte_style(b, theme)
+        };
         spans.push(Span::styled(c.to_string(), style));
     }
     Line::from(spans)
@@ -366,17 +495,24 @@ pub fn hex_line(
 fn draw_hex(f: &mut Frame, app: &mut App, area: Rect) {
     let visible = usize::from(area.height.saturating_sub(2));
     let row = app.selected_row();
-    let focused = app.focus == Panel::Hex;
+    let focused = app.focus == crate::app::Panel::Hex;
     let theme = app.theme.clone();
+    let icons = app.icons;
     let Some(e) = app.selected_index().and_then(|i| app.store.get(i)) else {
         f.render_widget(
-            Paragraph::new("").block(block(" Hex ", focused, &theme)),
+            Paragraph::new("").block(panel_block(
+                format!(" {}Hex ", icons.title_hex()),
+                focused,
+                &theme,
+            )),
             area,
         );
         return;
     };
     let data = &e.raw.data;
-    let hl = row.and_then(|r| highlight_range(r.offset, r.len, data.len()));
+    let hl = row
+        .as_ref()
+        .and_then(|r| highlight_range(r.offset, r.len, data.len()));
     let hl_start = hl.as_ref().map(|r| r.start);
     let mut offset = app.hex_offset;
     if hl_start != app.last_hl {
@@ -389,114 +525,27 @@ fn draw_hex(f: &mut Frame, app: &mut App, area: Rect) {
     let lines: Vec<Line> = (offset..total.min(offset + visible))
         .map(|l| hex_line(data, l, hl.as_ref(), &theme))
         .collect();
+    let width = usize::from(area.width);
+    let field = row
+        .filter(|r| r.len > 0)
+        .map(|r| {
+            let mut name: String = r
+                .label
+                .chars()
+                .take(width.saturating_sub(24).clamp(8, 48))
+                .collect();
+            if name.chars().count() < r.label.chars().count() {
+                name.push_str(icons.ellipsis());
+            }
+            format!(" · {name}")
+        })
+        .unwrap_or_default();
+    let title = format!(" {}Hex{field} · {} bayt ", icons.title_hex(), data.len());
     app.hex_offset = offset;
     app.last_hl = hl_start;
     f.render_widget(
-        Paragraph::new(lines).block(block(" Hex ", focused, &theme)),
+        Paragraph::new(lines).block(panel_block(title, focused, &theme)),
         area,
     );
-}
-
-fn draw_status(f: &mut Frame, app: &App, area: Rect) {
-    let mut parts = vec![
-        Span::styled(
-            format!(" {} ", app.source_name()),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(format!(
-            "│ gösterilen/toplam: {}/{} │ düşen: {} ",
-            app.displayed_len(),
-            app.store.total() + app.pending_len() as u64,
-            app.dropped()
-        )),
-    ];
-    if let Some(InputLine {
-        kind: InputKind::Filter,
-        state: FilterState::Invalid(e),
-        ..
-    }) = &app.input
-    {
-        parts.push(Span::styled(
-            format!("│ hata: {} ", e.msg),
-            Style::default()
-                .fg(app.theme.malformed)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-    if let Some(pct) = app.filter_progress() {
-        parts.push(Span::styled(
-            format!("│ filtreleniyor %{pct} "),
-            Style::default().fg(app.theme.arp),
-        ));
-    }
-    if app.paused {
-        parts.push(Span::styled(
-            format!("│ PAUSED (+{}) ", app.pending_len()),
-            Style::default()
-                .fg(app.theme.arp)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-    if app.autoscroll {
-        parts.push(Span::styled(
-            "│ AUTOSCROLL ",
-            Style::default()
-                .fg(app.theme.http)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-    if let Some(pct) = app.store.index_progress() {
-        parts.push(Span::styled(
-            format!("│ indeksleniyor %{pct} "),
-            Style::default().fg(app.theme.arp),
-        ));
-    }
-    if let Some(err) = app.store.error() {
-        parts.push(Span::styled(
-            format!("│ hata: {err} "),
-            Style::default().fg(app.theme.malformed),
-        ));
-    }
-    if let Some(msg) = &app.message {
-        parts.push(Span::raw(format!("│ {msg} ")));
-    }
-    if !app.filter_text.is_empty() {
-        parts.push(Span::raw(format!("│ filtre: {} ", app.filter_text)));
-    }
-    if app.resolve_names {
-        parts.push(Span::raw("│ ad çözümleme "));
-    }
-    parts.push(Span::raw("│ ?: yardım"));
-    f.render_widget(
-        Paragraph::new(Line::from(parts)).style(Style::default().bg(app.theme.status_bg)),
-        area,
-    );
-}
-
-fn draw_help(f: &mut Frame, theme: &Theme) {
-    let area = f.area();
-    let h = u16::try_from(HELP.len() + 2)
-        .unwrap_or(u16::MAX)
-        .min(area.height);
-    let w = 50.min(area.width);
-    let r = Rect::new(
-        area.x + (area.width - w) / 2,
-        area.y + (area.height - h) / 2,
-        w,
-        h,
-    );
-    let lines: Vec<Line> = HELP
-        .iter()
-        .map(|(k, v)| {
-            Line::from(vec![
-                Span::styled(format!("{k:<18}"), Style::default().fg(theme.border_focus)),
-                Span::raw(*v),
-            ])
-        })
-        .collect();
-    f.render_widget(Clear, r);
-    f.render_widget(
-        Paragraph::new(lines).block(block(" Yardım ", true, theme)),
-        r,
-    );
+    scrollbar(f, area, total, visible, offset, icons, &theme);
 }

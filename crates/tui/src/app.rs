@@ -1,7 +1,7 @@
 //! Uygulama durumu ve eylemler (render'dan bağımsız).
 
 use std::collections::{HashSet, VecDeque};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use pakiz_dissect::{Dissection, RawPacket};
 use pakiz_filter::{complete, FieldCatalog, Filter, FilterError};
@@ -12,7 +12,9 @@ use ratatui::crossterm::event::{
 use ratatui::layout::{Position, Rect};
 
 use crate::analyzer::{catalog, Analyzer};
+use crate::icons::IconSet;
 use crate::keymap::{Action, Keymap};
+use crate::palette::{self, Candidate};
 use crate::source::{PacketSource, VecSource};
 use crate::store::PacketStore;
 use crate::theme::{ColorRule, Theme};
@@ -30,6 +32,55 @@ pub const FILTER_BATCH: usize = 5_000;
 
 /// Dosya modunda her tick'te analiz edilecek (dissect + akış + istatistik) en fazla paket.
 pub const ANALYZE_BATCH: usize = 10_000;
+
+/// Geçici bildirimin ömrü.
+pub const TOAST_TTL: Duration = Duration::from_millis(2500);
+
+/// Bildirim türü (renk).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToastKind {
+    Info,
+    Ok,
+    Warn,
+    Error,
+}
+
+/// Sağ üstte kısa süre görünen bildirim.
+#[derive(Debug, Clone)]
+pub struct Toast {
+    pub text: String,
+    pub kind: ToastKind,
+    /// Oluşturulma anı; [`TOAST_TTL`] sonra kalkar.
+    pub born: Instant,
+}
+
+/// Panel düzeni (oturum içinde tutulur).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayoutState {
+    /// Odaklı panel tüm gövdeyi kaplar (`z`).
+    pub zoom: bool,
+    /// Yatay düzen: liste üstte, ağaç | hex yan yana (`L`).
+    pub horizontal: bool,
+    /// Listenin yüzde payı (`+` / `-`).
+    pub split: u16,
+}
+
+impl Default for LayoutState {
+    fn default() -> Self {
+        Self {
+            zoom: false,
+            horizontal: false,
+            split: Self::DEFAULT_SPLIT,
+        }
+    }
+}
+
+impl LayoutState {
+    pub const DEFAULT_SPLIT: u16 = 45;
+    pub const MIN_SPLIT: u16 = 15;
+    pub const MAX_SPLIT: u16 = 75;
+    pub const STEP: u16 = 5;
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Panel {
@@ -128,8 +179,18 @@ pub struct App {
     /// Hex panelinin son takip ettiği vurgu başlangıcı.
     pub(crate) last_hl: Option<usize>,
     max_pending: usize,
-    /// Durum çubuğunda gösterilen son komut sonucu.
-    pub message: Option<String>,
+    /// Geçici bildirim (komut sonuçları, hatalar).
+    pub toast: Option<Toast>,
+    pub icons: IconSet,
+    pub layout: LayoutState,
+    /// Komut paletinde vurgulu aday.
+    pub palette_sel: usize,
+    /// Aday ↑/↓ ile seçildi mi (Enter adayı kabul eder).
+    palette_nav: bool,
+    /// Uygulama başlangıcı (geçen süre, yanıp sönme, spinner).
+    pub started: Instant,
+    /// `[[coloring]]` kurallarının `coloring` başındaki sayısı (tema değişince korunur).
+    user_rules: usize,
     /// Etkin görünüm (sekme).
     pub view: View,
     pub follow: Option<FollowView>,
@@ -182,7 +243,13 @@ impl App {
             areas: Areas::default(),
             last_hl: None,
             max_pending: max_packets.max(1),
-            message: None,
+            toast: None,
+            icons: IconSet::default(),
+            layout: LayoutState::default(),
+            palette_sel: 0,
+            palette_nav: false,
+            started: Instant::now(),
+            user_rules: 0,
             view: View::Packets,
             follow: None,
             conv: ConvView::default(),
@@ -198,11 +265,62 @@ impl App {
     /// # Errors
     /// Varsayılan kural derlenemezse.
     pub fn set_theme(&mut self, theme: Theme, rules: Vec<ColorRule>) -> Result<(), FilterError> {
+        let defaults = ColorRule::defaults(&theme, &self.catalog)?;
+        self.user_rules = rules.len();
         let mut coloring = rules;
-        coloring.extend(ColorRule::defaults(&theme, &self.catalog)?);
+        coloring.extend(defaults);
         self.coloring = coloring;
         self.theme = theme;
         Ok(())
+    }
+
+    /// Çalışma zamanında tema değiştirir; config'teki kullanıcı kuralları korunur.
+    fn switch_theme(&mut self, theme: Theme) -> Result<(), FilterError> {
+        let defaults = ColorRule::defaults(&theme, &self.catalog)?;
+        self.coloring
+            .drain(self.user_rules.min(self.coloring.len())..);
+        self.coloring.extend(defaults);
+        self.theme = theme;
+        Ok(())
+    }
+
+    /// Geçici bildirim gösterir.
+    pub fn notify(&mut self, kind: ToastKind, text: impl Into<String>) {
+        self.toast = Some(Toast {
+            text: text.into(),
+            kind,
+            born: Instant::now(),
+        });
+    }
+
+    /// Süresi dolan bildirimi kaldırır; kaldırıldıysa `true`.
+    pub fn expire_toast(&mut self) -> bool {
+        let gone = self
+            .toast
+            .as_ref()
+            .is_some_and(|t| t.born.elapsed() >= TOAST_TTL);
+        if gone {
+            self.toast = None;
+        }
+        gone
+    }
+
+    /// Eylemin ilk tuşu (ipuçları için); bağlı değilse `-`.
+    #[must_use]
+    pub fn key_hint(&self, action: Action) -> String {
+        self.keymap
+            .keys_for(action)
+            .first()
+            .map_or_else(|| "-".into(), |&k| crate::keymap::format_key(k))
+    }
+
+    /// Komut paleti adayları (yalnızca komut satırı açıkken).
+    #[must_use]
+    pub fn palette(&self) -> Vec<Candidate> {
+        match &self.input {
+            Some(i) if i.kind == InputKind::Command => palette::candidates(&i.text),
+            _ => Vec::new(),
+        }
     }
 
     /// Canlı yakalama kipi: süreç sütunu (`sock_diag` / `/proc`) ve istatistik
@@ -345,22 +463,71 @@ impl App {
 
     fn run_command(&mut self, cmd: &str) {
         let cmd = cmd.trim();
-        if cmd == "q" {
-            self.quit = true;
-        } else if cmd == "follow" {
-            self.open_follow();
-        } else if cmd == "conv" {
-            self.open_view(View::Conversations);
-        } else if cmd == "stats" {
-            self.open_view(View::Stats);
-        } else if let Some(path) = cmd.strip_prefix("w ").map(str::trim) {
-            self.message = Some(match self.export(path) {
-                Ok(n) => format!("{n} paket yazıldı: {path}"),
-                Err(e) => format!("yazılamadı: {e}"),
-            });
-        } else if !cmd.is_empty() {
-            self.message = Some(format!("bilinmeyen komut: {cmd}"));
+        let (name, arg) = cmd
+            .split_once(char::is_whitespace)
+            .map_or((cmd, ""), |(n, a)| (n, a.trim()));
+        match (name, arg) {
+            ("", _) => {}
+            ("q", _) => self.quit = true,
+            ("follow", _) => self.open_follow(),
+            ("conv", _) => self.open_view(View::Conversations),
+            ("stats", _) => self.open_view(View::Stats),
+            ("packets", _) => self.view = View::Packets,
+            ("w", "") => self.notify(ToastKind::Error, "kullanım: w <dosya>"),
+            ("w", path) => match self.export(path) {
+                Ok(n) => self.notify(ToastKind::Ok, format!("{n} paket yazıldı: {path}")),
+                Err(e) => self.notify(ToastKind::Error, format!("yazılamadı: {e}")),
+            },
+            ("theme", "") => self.notify(
+                ToastKind::Info,
+                format!("kullanım: theme <{}>", Theme::NAMES.join("|")),
+            ),
+            ("theme", n) => match Theme::by_name(n) {
+                Some(t) => match self.switch_theme(t) {
+                    Ok(()) => self.notify(ToastKind::Ok, format!("tema: {n}")),
+                    Err(e) => {
+                        self.notify(ToastKind::Error, format!("tema uygulanamadı: {}", e.msg));
+                    }
+                },
+                None => self.notify(
+                    ToastKind::Error,
+                    format!("bilinmeyen tema: {n} ({})", Theme::NAMES.join(", ")),
+                ),
+            },
+            ("layout", a) => match a {
+                "vertical" | "v" | "dikey" => self.set_horizontal(false),
+                "horizontal" | "h" | "yatay" => self.set_horizontal(true),
+                "zoom" | "z" => self.apply(Action::Zoom),
+                _ => self.notify(
+                    ToastKind::Error,
+                    "kullanım: layout <vertical|horizontal|zoom>",
+                ),
+            },
+            ("icons", a) => match IconSet::from_name(a) {
+                Some(i) => {
+                    self.icons = i;
+                    self.notify(ToastKind::Ok, format!("ikonlar: {}", i.name()));
+                }
+                None => self.notify(
+                    ToastKind::Error,
+                    format!("kullanım: icons <{}>", IconSet::NAMES.join("|")),
+                ),
+            },
+            _ => self.notify(ToastKind::Error, format!("bilinmeyen komut: {cmd}")),
         }
+    }
+
+    fn set_horizontal(&mut self, horizontal: bool) {
+        self.layout.horizontal = horizontal;
+        self.view = View::Packets;
+        self.notify(
+            ToastKind::Info,
+            if horizontal {
+                "düzen: yatay"
+            } else {
+                "düzen: dikey"
+            },
+        );
     }
 
     #[must_use]
@@ -381,7 +548,7 @@ impl App {
 
     /// Kaynaktan en fazla `DRAIN_BATCH` paket çeker; değişiklik olduysa `true`.
     pub fn ingest(&mut self) -> bool {
-        let mut changed = false;
+        let mut changed = self.expire_toast();
         if self.store.is_file() {
             changed |= self.store.index_more(INDEX_BATCH) > 0;
             changed |= self.analyze_more(ANALYZE_BATCH);
@@ -605,7 +772,10 @@ impl App {
                 self.view = View::Follow;
             }
             None => {
-                self.message = Some("seçili paket bir TCP/UDP akışına ait değil".into());
+                self.notify(
+                    ToastKind::Warn,
+                    "seçili paket bir TCP/UDP akışına ait değil",
+                );
             }
         }
     }
@@ -649,13 +819,13 @@ impl App {
             Action::Pause => self.paused = !self.paused,
             Action::ToggleResolve => {
                 self.resolve_names = !self.resolve_names;
-                self.message = Some(
+                self.notify(
+                    ToastKind::Info,
                     if self.resolve_names {
                         "ad çözümleme açık"
                     } else {
                         "ad çözümleme kapalı"
-                    }
-                    .into(),
+                    },
                 );
             }
             Action::Follow => self.open_view(View::Follow),
@@ -776,8 +946,30 @@ impl App {
                 }
             }
             Action::Filter => self.open_input(InputKind::Filter),
+            Action::Zoom => {
+                self.layout.zoom = !self.layout.zoom;
+            }
+            Action::ToggleLayout => {
+                self.layout.horizontal = !self.layout.horizontal;
+            }
+            Action::Grow => self.resize(true),
+            Action::Shrink => self.resize(false),
             _ => {}
         }
+    }
+
+    /// Odaklı panelin payını değiştirir: liste odaktayken liste, değilse alttaki
+    /// paneller büyür/küçülür.
+    fn resize(&mut self, grow: bool) {
+        let list_grows = grow == (self.focus == Panel::List);
+        let l = &mut self.layout;
+        l.split = if list_grows {
+            (l.split + LayoutState::STEP).min(LayoutState::MAX_SPLIT)
+        } else {
+            l.split
+                .saturating_sub(LayoutState::STEP)
+                .max(LayoutState::MIN_SPLIT)
+        };
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
@@ -789,7 +981,11 @@ impl App {
             return;
         }
         if self.show_help {
-            if matches!(key.code, KeyCode::Esc | KeyCode::Char('?' | 'q')) {
+            let by_map = matches!(
+                self.keymap.action(&key),
+                Some(Action::Help | Action::Back | Action::Quit)
+            );
+            if by_map || matches!(key.code, KeyCode::Esc | KeyCode::Char('?' | 'q')) {
                 self.show_help = false;
             }
             return;
@@ -807,14 +1003,41 @@ impl App {
         if code != KeyCode::Tab {
             self.completion = None;
         }
+        if !is_filter
+            && !matches!(
+                code,
+                KeyCode::Tab | KeyCode::Up | KeyCode::Down | KeyCode::Enter
+            )
+        {
+            self.palette_sel = 0;
+            self.palette_nav = false;
+        }
         match code {
             KeyCode::Esc => self.input = None,
-            KeyCode::Enter => self.submit_input(),
+            KeyCode::Enter => {
+                if is_filter || !self.palette_enter() {
+                    self.submit_input();
+                }
+            }
             KeyCode::Backspace => {
                 inp.text.pop();
             }
             KeyCode::Char(c) => inp.text.push(c),
             KeyCode::Tab if is_filter => self.complete_input(),
+            KeyCode::Tab => {
+                self.palette_accept();
+            }
+            KeyCode::Up | KeyCode::Down if !is_filter => {
+                let n = palette::candidates(&inp.text).len();
+                if n > 0 {
+                    self.palette_nav = true;
+                    self.palette_sel = if code == KeyCode::Down {
+                        (self.palette_sel + 1) % n
+                    } else {
+                        (self.palette_sel + n - 1) % n
+                    };
+                }
+            }
             KeyCode::Up | KeyCode::Down if is_filter && !self.history.is_empty() => {
                 let last = self.history.len() - 1;
                 self.history_pos = match (code, self.history_pos) {
@@ -834,6 +1057,29 @@ impl App {
         self.revalidate();
     }
 
+    /// Vurgulu adayı komut satırına yazar; komut tamamlandıysa `true`.
+    fn palette_accept(&mut self) -> bool {
+        let Some(inp) = self.input.as_mut() else {
+            return false;
+        };
+        let cands = palette::candidates(&inp.text);
+        let Some(c) = cands.get(self.palette_sel).or(cands.first()) else {
+            return false;
+        };
+        inp.text.clone_from(&c.text);
+        self.palette_sel = 0;
+        c.complete
+    }
+
+    /// Enter: ↑/↓ ile aday seçildiyse kabul eder. `true` = çalıştırma, satır açık kalır.
+    fn palette_enter(&mut self) -> bool {
+        if !self.palette_nav {
+            return false;
+        }
+        self.palette_nav = false;
+        !self.palette_accept()
+    }
+
     fn submit_input(&mut self) {
         let Some(inp) = self.input.take() else {
             return;
@@ -841,7 +1087,6 @@ impl App {
         match inp.kind {
             InputKind::Filter => match self.set_filter(&inp.text) {
                 Ok(()) => {
-                    self.message = None;
                     let t = self.filter_text.clone();
                     if !t.is_empty() && self.history.last() != Some(&t) {
                         self.history.push(t);
@@ -856,6 +1101,7 @@ impl App {
                 }
             },
             InputKind::Command => {
+                self.palette_sel = 0;
                 self.run_command(&inp.text);
                 self.command_text = inp.text;
             }

@@ -5,7 +5,8 @@ use pakiz_filter::{FieldCatalog, Filter, FilterError};
 use pakiz_flow::AnalysisFlags;
 use ratatui::style::{Color, Style};
 
-/// TUI renkleri. Yerleşik: [`Theme::dark`] (varsayılan) ve [`Theme::light`].
+/// TUI renkleri. Yerleşik: [`Theme::dark`] (varsayılan), [`Theme::light`],
+/// [`Theme::ocean`] ve [`Theme::forest`].
 #[derive(Debug, Clone)]
 pub struct Theme {
     /// Genel zemin / yazı rengi (`Reset` = terminalin kendi rengi).
@@ -39,6 +40,32 @@ pub struct Theme {
     /// Sıfır/dolu pencere.
     pub window_fg: Color,
     pub window_bg: Color,
+    /// Vurgu rengi: odaklı kenarlık/başlık, aktif sekme, mod rozeti.
+    pub accent: Color,
+    /// Seçili satırın yazı rengi (`selected_bg` üstünde yüksek kontrast).
+    pub selected_fg: Color,
+    /// Çift/tek satır zebra zemini (çok hafif).
+    pub zebra_bg: Color,
+    /// Renkli rozet (protokol, mod) üstündeki koyu/açık yazı.
+    pub badge_fg: Color,
+    /// Üst başlık çubuğu zemini.
+    pub header_bg: Color,
+    /// Durum çubuğunda ikinci bölüm zemini.
+    pub seg_bg: Color,
+    pub toast_bg: Color,
+    pub toast_fg: Color,
+    /// Soluk yazı (ofset sütunu, ipuçları, boş baytlar).
+    pub dim: Color,
+    pub warn: Color,
+    pub ok: Color,
+    pub danger: Color,
+    /// Filtre hata satırında `filter_err_bg` üstündeki yazı.
+    pub filter_err_fg: Color,
+    /// Hex: kontrol karakterleri / 0x80 üstü baytlar.
+    pub hex_ctrl: Color,
+    pub hex_high: Color,
+    /// Hex vurgusu üstündeki yazı.
+    pub hex_highlight_fg: Color,
 }
 
 impl Default for Theme {
@@ -49,7 +76,7 @@ impl Default for Theme {
 
 impl Theme {
     /// Yerleşik tema adları.
-    pub const NAMES: [&'static str; 2] = ["dark", "light"];
+    pub const NAMES: [&'static str; 4] = ["dark", "light", "ocean", "forest"];
 
     /// Ada göre yerleşik tema (büyük/küçük harf duyarsız).
     #[must_use]
@@ -57,6 +84,8 @@ impl Theme {
         match name.to_ascii_lowercase().as_str() {
             "dark" => Some(Self::dark()),
             "light" => Some(Self::light()),
+            "ocean" => Some(Self::ocean()),
+            "forest" => Some(Self::forest()),
             _ => None,
         }
     }
@@ -75,10 +104,10 @@ impl Theme {
             http: Color::Green,
             malformed: Color::Red,
             other: Color::Reset,
-            selected_bg: Color::DarkGray,
-            hex_highlight_bg: Color::Blue,
-            border: Color::Gray,
-            border_focus: Color::Cyan,
+            selected_bg: Color::Rgb(0x34, 0x3d, 0x5e),
+            hex_highlight_bg: Color::Rgb(0x2f, 0x5f, 0xb0),
+            border: Color::Rgb(0x6c, 0x72, 0x93),
+            border_focus: Color::Rgb(0x56, 0xc8, 0xe8),
             status_bg: Color::Rgb(0x30, 0x30, 0x40),
             filter_ok_bg: Color::Rgb(0x1f, 0x5f, 0x1f),
             filter_err_bg: Color::Rgb(0x7f, 0x1f, 0x1f),
@@ -90,6 +119,22 @@ impl Theme {
             rst_bg: Color::Rgb(0xa4, 0x00, 0x00),
             window_fg: Color::Black,
             window_bg: Color::Rgb(0xff, 0xd7, 0x5f),
+            accent: Color::Rgb(0x56, 0xc8, 0xe8),
+            selected_fg: Color::Rgb(0xff, 0xff, 0xff),
+            zebra_bg: Color::Rgb(0x1c, 0x1d, 0x28),
+            badge_fg: Color::Rgb(0x14, 0x14, 0x1c),
+            header_bg: Color::Rgb(0x24, 0x28, 0x3b),
+            seg_bg: Color::Rgb(0x3b, 0x40, 0x5a),
+            toast_bg: Color::Rgb(0x2a, 0x2e, 0x44),
+            toast_fg: Color::Rgb(0xf2, 0xf4, 0xff),
+            dim: Color::Rgb(0x8a, 0x90, 0xac),
+            warn: Color::Rgb(0xff, 0xc7, 0x4d),
+            ok: Color::Rgb(0x8c, 0xe0, 0x7a),
+            danger: Color::Rgb(0xff, 0x6b, 0x6b),
+            filter_err_fg: Color::Rgb(0xff, 0xff, 0xff),
+            hex_ctrl: Color::Rgb(0xe0, 0xaf, 0x68),
+            hex_high: Color::Rgb(0xbb, 0x9a, 0xf7),
+            hex_highlight_fg: Color::Rgb(0xff, 0xff, 0xff),
         }
     }
 
@@ -122,6 +167,100 @@ impl Theme {
             rst_bg: Color::Rgb(0xa4, 0x00, 0x00),
             window_fg: Color::Black,
             window_bg: Color::Rgb(0xff, 0xd7, 0x5f),
+            accent: Color::Rgb(0x00, 0x60, 0xc0),
+            selected_fg: Color::Rgb(0x10, 0x10, 0x20),
+            zebra_bg: Color::Rgb(0xf0, 0xf1, 0xf5),
+            badge_fg: Color::Rgb(0xff, 0xff, 0xff),
+            header_bg: Color::Rgb(0xdd, 0xe0, 0xea),
+            seg_bg: Color::Rgb(0xcc, 0xd0, 0xdc),
+            toast_bg: Color::Rgb(0xff, 0xff, 0xff),
+            toast_fg: Color::Rgb(0x20, 0x20, 0x28),
+            dim: Color::Rgb(0x6a, 0x6a, 0x7c),
+            warn: Color::Rgb(0x8a, 0x5a, 0x00),
+            ok: Color::Rgb(0x1b, 0x6e, 0x2e),
+            danger: Color::Rgb(0xb0, 0x00, 0x20),
+            filter_err_fg: Color::Rgb(0x50, 0x00, 0x00),
+            hex_ctrl: Color::Rgb(0x9a, 0x5a, 0x00),
+            hex_high: Color::Rgb(0x6a, 0x1b, 0x9a),
+            hex_highlight_fg: Color::Rgb(0x20, 0x20, 0x20),
+        }
+    }
+
+    /// Mavi-camgöbeği, koyu lacivert zemin.
+    #[must_use]
+    pub fn ocean() -> Self {
+        Self {
+            bg: Color::Rgb(0x0b, 0x1e, 0x2d),
+            fg: Color::Rgb(0xd6, 0xe6, 0xf0),
+            tcp: Color::Rgb(0x82, 0xb1, 0xff),
+            udp: Color::Rgb(0x4d, 0xd0, 0xe1),
+            arp: Color::Rgb(0xff, 0xcb, 0x6b),
+            icmp: Color::Rgb(0xf7, 0x8c, 0xc6),
+            dns: Color::Rgb(0x7f, 0xe0, 0xb0),
+            http: Color::Rgb(0x9c, 0xe0, 0x6a),
+            other: Color::Rgb(0xd6, 0xe6, 0xf0),
+            selected_bg: Color::Rgb(0x1b, 0x4a, 0x6b),
+            hex_highlight_bg: Color::Rgb(0x1f, 0x6f, 0xa8),
+            border: Color::Rgb(0x3a, 0x5a, 0x75),
+            border_focus: Color::Rgb(0x4d, 0xd0, 0xe1),
+            status_bg: Color::Rgb(0x12, 0x33, 0x4b),
+            accent: Color::Rgb(0x4d, 0xd0, 0xe1),
+            zebra_bg: Color::Rgb(0x0f, 0x26, 0x38),
+            badge_fg: Color::Rgb(0x08, 0x16, 0x20),
+            header_bg: Color::Rgb(0x10, 0x2b, 0x40),
+            seg_bg: Color::Rgb(0x1d, 0x46, 0x66),
+            toast_bg: Color::Rgb(0x12, 0x33, 0x4b),
+            dim: Color::Rgb(0x8c, 0xa8, 0xbf),
+            ..Self::dark()
+        }
+    }
+
+    /// Yeşil tonlu, koyu orman zemini.
+    #[must_use]
+    pub fn forest() -> Self {
+        Self {
+            bg: Color::Rgb(0x14, 0x1f, 0x17),
+            fg: Color::Rgb(0xdc, 0xe8, 0xd8),
+            tcp: Color::Rgb(0xc9, 0xb4, 0xe8),
+            udp: Color::Rgb(0x7f, 0xd0, 0xd0),
+            arp: Color::Rgb(0xe6, 0xc8, 0x6a),
+            icmp: Color::Rgb(0xe8, 0x9a, 0xb4),
+            dns: Color::Rgb(0x9f, 0xe0, 0x8a),
+            http: Color::Rgb(0x6f, 0xcf, 0x97),
+            other: Color::Rgb(0xdc, 0xe8, 0xd8),
+            selected_bg: Color::Rgb(0x2f, 0x5a, 0x3f),
+            hex_highlight_bg: Color::Rgb(0x3d, 0x7a, 0x52),
+            border: Color::Rgb(0x48, 0x68, 0x52),
+            border_focus: Color::Rgb(0x6f, 0xcf, 0x97),
+            status_bg: Color::Rgb(0x22, 0x38, 0x29),
+            accent: Color::Rgb(0x6f, 0xcf, 0x97),
+            zebra_bg: Color::Rgb(0x19, 0x28, 0x1d),
+            badge_fg: Color::Rgb(0x0e, 0x18, 0x11),
+            header_bg: Color::Rgb(0x1d, 0x30, 0x23),
+            seg_bg: Color::Rgb(0x2d, 0x4a, 0x37),
+            toast_bg: Color::Rgb(0x22, 0x38, 0x29),
+            dim: Color::Rgb(0x92, 0xac, 0x98),
+            ..Self::dark()
+        }
+    }
+
+    /// Rozet (protokol hücresi) zemini: protokol rengi, tema "terminal rengi"ysa `dim`.
+    #[must_use]
+    pub fn badge_color(&self, protocol: &str, malformed: bool) -> Color {
+        match self.protocol_color(protocol, malformed) {
+            Color::Reset => self.dim,
+            c => c,
+        }
+    }
+
+    /// Ağaçta katman başlığı rengi: bilinen protokolse rengi, değilse vurgu.
+    #[must_use]
+    pub fn layer_color(&self, protocol: &str) -> Color {
+        match protocol {
+            "tcp" | "udp" | "arp" | "icmp" | "icmpv6" | "dns" | "mdns" | "http" | "tls" => {
+                self.protocol_color(protocol, false)
+            }
+            _ => self.accent,
         }
     }
 
