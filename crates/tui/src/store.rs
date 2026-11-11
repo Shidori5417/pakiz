@@ -239,6 +239,22 @@ impl PacketStore {
         }
     }
 
+    /// Depodaki ilk paketin numarası (boşsa bir sonraki eklenecek numara).
+    /// `idx`. paketin numarası `first_number() + idx`'tir.
+    #[must_use]
+    pub fn first_number(&self) -> u64 {
+        match &self.mode {
+            Mode::Memory { buf, .. } => self.next_number - buf.len() as u64,
+            Mode::File(_) => 1,
+        }
+    }
+
+    /// Bellek modunda bir sonraki [`PacketStore::push`]'un alacağı numara.
+    #[must_use]
+    pub fn next_number(&self) -> u64 {
+        self.next_number
+    }
+
     /// Halka tampon taşmasıyla düşen paket.
     #[must_use]
     pub fn evicted(&self) -> u64 {

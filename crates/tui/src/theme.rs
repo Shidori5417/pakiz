@@ -18,6 +18,8 @@ pub struct Theme {
     pub border: Color,
     pub border_focus: Color,
     pub status_bg: Color,
+    pub filter_ok_bg: Color,
+    pub filter_err_bg: Color,
 }
 
 impl Default for Theme {
@@ -36,6 +38,8 @@ impl Default for Theme {
             border: Color::Gray,
             border_focus: Color::Cyan,
             status_bg: Color::Rgb(0x30, 0x30, 0x40),
+            filter_ok_bg: Color::Rgb(0x1f, 0x5f, 0x1f),
+            filter_err_bg: Color::Rgb(0x7f, 0x1f, 0x1f),
         }
     }
 }

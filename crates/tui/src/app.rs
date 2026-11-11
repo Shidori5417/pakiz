@@ -3,6 +3,7 @@
 use std::collections::{HashSet, VecDeque};
 
 use pakiz_dissect::{Dissection, RawPacket, Registry};
+use pakiz_filter::{complete, FieldCatalog, Filter, FilterError};
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -20,6 +21,9 @@ pub const DRAIN_BATCH: usize = 50_000;
 /// Dosya modunda her tick'te indekslenecek en fazla paket.
 pub const INDEX_BATCH: usize = 20_000;
 
+/// Filtre değiştikten sonra her tick'te yeniden değerlendirilecek en fazla paket.
+pub const FILTER_BATCH: usize = 5_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Panel {
     List,
@@ -33,11 +37,31 @@ pub enum InputKind {
     Command,
 }
 
-/// Alt giriş satırı (filtre Aşama 5'te bağlanacak).
+/// Filtre giriş satırının canlı doğrulama durumu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FilterState {
+    Empty,
+    Valid,
+    Invalid(FilterError),
+}
+
+/// Alt giriş satırı (`/` filtre, `:` komut). İmleç her zaman sondadır.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputLine {
     pub kind: InputKind,
     pub text: String,
+    /// Yalnızca filtre satırında anlamlı.
+    pub state: FilterState,
+}
+
+/// Tab ile otomatik tamamlama durumu (birden çok aday varken).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Completion {
+    /// Tamamlanan kelimenin metindeki bayt başlangıcı.
+    pub start: usize,
+    pub candidates: Vec<&'static str>,
+    /// Tab döngüsünde seçili aday.
+    pub index: Option<usize>,
 }
 
 /// Son çizimdeki panel alanları (fare isabeti ve sayfa boyu için).
@@ -69,10 +93,20 @@ pub struct App {
     pub autoscroll: bool,
     pub show_help: bool,
     pub input: Option<InputLine>,
-    /// Onaylanmış son filtre metni (henüz uygulanmıyor).
+    pub completion: Option<Completion>,
+    /// Uygulanan filtre metni (boş = filtre yok).
     pub filter_text: String,
+    pub catalog: FieldCatalog,
+    filter: Option<Filter>,
+    /// Filtreyi geçen paketlerin numaraları (artan). Seçim/liste bu sıraya göredir.
+    shown: VecDeque<u64>,
+    /// Henüz filtreden geçirilmemiş ilk paket numarası.
+    scan_next: u64,
+    history: Vec<String>,
+    history_pos: Option<usize>,
     pub command_text: String,
     pub quit: bool,
+    /// Gösterilen listede (filtre sonrası) seçili konum.
     pub selected: Option<usize>,
     pub list_offset: usize,
     pub tree_selected: usize,
@@ -104,7 +138,14 @@ impl App {
             autoscroll: true,
             show_help: false,
             input: None,
+            completion: None,
             filter_text: String::new(),
+            catalog: FieldCatalog::default(),
+            filter: None,
+            shown: VecDeque::new(),
+            scan_next: 1,
+            history: Vec::new(),
+            history_pos: None,
             command_text: String::new(),
             quit: false,
             selected: None,
@@ -135,21 +176,100 @@ impl App {
         app
     }
 
-    /// Gösterilen paketlerin store indeksleri (sırayla).
-    ///
-    /// Şimdilik tüm paketler; Aşama 5'te display filter buraya bağlanacak ve
-    /// liste, dışa aktarma vb. yalnızca bu indeksleri kullanacak.
+    /// Filtreyi geçen paketlerin store indeksleri (sırayla).
     pub fn displayed(&self) -> impl Iterator<Item = usize> + '_ {
-        0..self.store.len()
+        let first = self.store.first_number();
+        self.shown.iter().map(move |&n| index_of(n, first))
+    }
+
+    /// Gösterilen paket sayısı.
+    #[must_use]
+    pub fn displayed_len(&self) -> usize {
+        self.shown.len()
+    }
+
+    /// Gösterilen listedeki `pos`. paketin store indeksi.
+    #[must_use]
+    pub fn store_index(&self, pos: usize) -> Option<usize> {
+        let n = *self.shown.get(pos)?;
+        Some(index_of(n, self.store.first_number()))
+    }
+
+    /// Seçili paketin store indeksi.
+    #[must_use]
+    pub fn selected_index(&self) -> Option<usize> {
+        self.store_index(self.selected?)
+    }
+
+    /// Display filter'ı derleyip uygular (boş metin = filtre yok). Mevcut paketler
+    /// [`App::ingest`] içinde tick başına [`FILTER_BATCH`] paket olarak yeniden süzülür.
+    ///
+    /// # Errors
+    /// Derleme hatası; bu durumda eski filtre kalır.
+    pub fn set_filter(&mut self, text: &str) -> Result<(), FilterError> {
+        let text = text.trim();
+        self.filter = if text.is_empty() {
+            None
+        } else {
+            Some(Filter::compile(text, &self.catalog)?)
+        };
+        self.filter_text = text.to_string();
+        self.shown.clear();
+        self.scan_next = self.store.first_number();
+        self.selected = None;
+        self.list_offset = 0;
+        Ok(())
+    }
+
+    /// Yeniden süzme sürüyorsa yüzde (0..=99).
+    #[must_use]
+    pub fn filter_progress(&self) -> Option<u8> {
+        let first = self.store.first_number();
+        let end = first + self.store.len() as u64;
+        if self.filter.is_none() || self.scan_next >= end {
+            return None;
+        }
+        let pct = (self.scan_next - first) * 100 / (end - first);
+        Some(u8::try_from(pct.min(99)).unwrap_or(99))
+    }
+
+    /// Henüz süzülmemiş paketlerden en fazla `budget` tanesini değerlendirir;
+    /// ilerleme olduysa `true`.
+    fn scan(&mut self, budget: usize) -> bool {
+        let first = self.store.first_number();
+        self.scan_next = self.scan_next.max(first);
+        let end = first + self.store.len() as u64;
+        let budget = if self.filter.is_none() {
+            usize::MAX
+        } else {
+            budget
+        };
+        let mut n = 0;
+        while self.scan_next < end && n < budget {
+            let num = self.scan_next;
+            let keep = self.filter.as_ref().is_none_or(|f| {
+                self.store.raw(index_of(num, first)).is_some_and(|raw| {
+                    let d = self.registry.dissect_numbered(&raw, Some(num));
+                    f.matches(&d, &raw)
+                })
+            });
+            if keep {
+                self.shown.push_back(num);
+            }
+            self.scan_next += 1;
+            n += 1;
+        }
+        n > 0
     }
 
     /// Gösterilen paketleri `path`'e yazar (biçim uzantıdan); yazılan sayıyı döner.
-    /// Dosya modunda önce indeksleme tamamlanır.
+    /// Dosya modunda önce indeksleme ve süzme tamamlanır.
     ///
     /// # Errors
     /// Dosya oluşturma/yazma hatası.
     pub fn export(&mut self, path: &str) -> pakiz_storage::Result<usize> {
         while self.store.index_more(INDEX_BATCH) > 0 {}
+        self.scan(usize::MAX);
         let mut w = pakiz_storage::create(path, pakiz_storage::Format::from_path(path))?;
         let mut n = 0;
         for i in self.displayed() {
@@ -196,11 +316,7 @@ impl App {
     pub fn ingest(&mut self) -> bool {
         let mut changed = false;
         if self.store.is_file() {
-            let first = self.store.is_empty();
             changed |= self.store.index_more(INDEX_BATCH) > 0;
-            if first && !self.store.is_empty() {
-                self.selected = Some(0);
-            }
         }
         if !self.paused {
             let n = self.pending.len().min(DRAIN_BATCH);
@@ -225,36 +341,62 @@ impl App {
                 self.add(p);
             }
         }
-        if changed && self.autoscroll && !self.paused && !self.store.is_empty() {
-            self.select(self.store.len() - 1);
+        changed |= self.scan(FILTER_BATCH);
+        if self.selected.is_none() && !self.shown.is_empty() {
+            self.selected = Some(0);
+        }
+        if changed && self.autoscroll && !self.paused && !self.shown.is_empty() {
+            self.select(self.shown.len() - 1);
         }
         changed
     }
 
-    fn add(&mut self, p: RawPacket) {
-        let d = self.registry.dissect(&p);
+    /// Paketi ayrıştırır, (süzme yetişmişse) filtreyi aynı ayrıştırma üzerinde
+    /// uygular ve özetle birlikte saklar.
+    pub(crate) fn add(&mut self, p: RawPacket) {
+        let number = self.store.next_number();
+        let d = self.registry.dissect_numbered(&p, Some(number));
+        let in_order = self.scan_next == number;
+        let keep = in_order && self.filter.as_ref().is_none_or(|f| f.matches(&d, &p));
         let malformed = d.layers.iter().any(pakiz_dissect::Layer::is_malformed);
-        if self.store.push(p, d.summary, malformed) > 0 {
+        let evicted = self.store.push(p, d.summary, malformed) > 0;
+        if in_order {
+            if keep {
+                self.shown.push_back(number);
+            }
+            self.scan_next += 1;
+        }
+        if evicted {
+            self.trim_evicted();
+        }
+    }
+
+    /// Halka tampondan düşen paketleri gösterilen listeden de çıkarır.
+    fn trim_evicted(&mut self) {
+        let first = self.store.first_number();
+        while self.shown.front().is_some_and(|&n| n < first) {
+            self.shown.pop_front();
             if let Some(s) = self.selected.as_mut() {
                 *s = s.saturating_sub(1);
             }
             self.list_offset = self.list_offset.saturating_sub(1);
         }
-        if self.selected.is_none() {
-            self.selected = Some(0);
+        if self.shown.is_empty() {
+            self.selected = None;
         }
+        self.scan_next = self.scan_next.max(first);
     }
 
-    fn select(&mut self, idx: usize) {
-        if self.store.is_empty() {
+    fn select(&mut self, pos: usize) {
+        if self.shown.is_empty() {
             return;
         }
-        self.selected = Some(idx.min(self.store.len() - 1));
+        self.selected = Some(pos.min(self.shown.len() - 1));
     }
 
     /// Seçili paketin ayrıştırması ve ağaç satırları (lazy, cache'li).
     pub fn tree(&mut self) -> Option<(&Dissection, &[TreeRow])> {
-        let e = self.store.get(self.selected?)?;
+        let e = self.store.get(self.selected_index()?)?;
         let stale = self.cache.as_ref().is_none_or(|c| c.number != e.number);
         if stale {
             let dissection = self.registry.dissect_numbered(&e.raw, Some(e.number));
@@ -298,7 +440,7 @@ impl App {
     }
 
     fn hex_lines(&self) -> usize {
-        self.selected
+        self.selected_index()
             .and_then(|i| self.store.get(i))
             .map_or(0, |e| e.raw.data.len().div_ceil(16))
     }
@@ -307,7 +449,7 @@ impl App {
     fn move_by(&mut self, panel: Panel, delta: isize) {
         match panel {
             Panel::List => {
-                if self.store.is_empty() {
+                if self.shown.is_empty() {
                     return;
                 }
                 let cur = self.selected.unwrap_or(0);
@@ -371,8 +513,8 @@ impl App {
             Action::Pause => self.paused = !self.paused,
             Action::AutoScroll => {
                 self.autoscroll = !self.autoscroll;
-                if self.autoscroll && !self.store.is_empty() {
-                    self.select(self.store.len() - 1);
+                if self.autoscroll && !self.shown.is_empty() {
+                    self.select(self.shown.len() - 1);
                 }
             }
             Action::Help => self.show_help = !self.show_help,
@@ -382,7 +524,14 @@ impl App {
                 } else {
                     (InputKind::Command, String::new())
                 };
-                self.input = Some(InputLine { kind, text });
+                self.input = Some(InputLine {
+                    kind,
+                    text,
+                    state: FilterState::Empty,
+                });
+                self.completion = None;
+                self.history_pos = None;
+                self.revalidate();
             }
         }
     }
@@ -391,26 +540,8 @@ impl App {
         if key.kind == KeyEventKind::Release {
             return;
         }
-        if let Some(inp) = self.input.as_mut() {
-            match key.code {
-                KeyCode::Esc => self.input = None,
-                KeyCode::Enter => {
-                    if let Some(inp) = self.input.take() {
-                        match inp.kind {
-                            InputKind::Filter => self.filter_text = inp.text,
-                            InputKind::Command => {
-                                self.run_command(&inp.text);
-                                self.command_text = inp.text;
-                            }
-                        }
-                    }
-                }
-                KeyCode::Backspace => {
-                    inp.text.pop();
-                }
-                KeyCode::Char(c) => inp.text.push(c),
-                _ => {}
-            }
+        if self.input.is_some() {
+            self.on_input_key(key.code);
             return;
         }
         if self.show_help {
@@ -421,6 +552,131 @@ impl App {
         }
         if let Some(a) = self.keymap.action(&key) {
             self.apply(a);
+        }
+    }
+
+    fn on_input_key(&mut self, code: KeyCode) {
+        let Some(inp) = self.input.as_mut() else {
+            return;
+        };
+        let is_filter = inp.kind == InputKind::Filter;
+        if code != KeyCode::Tab {
+            self.completion = None;
+        }
+        match code {
+            KeyCode::Esc => self.input = None,
+            KeyCode::Enter => self.submit_input(),
+            KeyCode::Backspace => {
+                inp.text.pop();
+            }
+            KeyCode::Char(c) => inp.text.push(c),
+            KeyCode::Tab if is_filter => self.complete_input(),
+            KeyCode::Up | KeyCode::Down if is_filter && !self.history.is_empty() => {
+                let last = self.history.len() - 1;
+                self.history_pos = match (code, self.history_pos) {
+                    (KeyCode::Up, None) => Some(last),
+                    (KeyCode::Up, Some(p)) => Some(p.saturating_sub(1)),
+                    (_, Some(p)) if p < last => Some(p + 1),
+                    _ => None,
+                };
+                inp.text = self
+                    .history_pos
+                    .and_then(|p| self.history.get(p))
+                    .cloned()
+                    .unwrap_or_default();
+            }
+            _ => {}
+        }
+        self.revalidate();
+    }
+
+    fn submit_input(&mut self) {
+        let Some(inp) = self.input.take() else {
+            return;
+        };
+        match inp.kind {
+            InputKind::Filter => match self.set_filter(&inp.text) {
+                Ok(()) => {
+                    self.message = None;
+                    let t = self.filter_text.clone();
+                    if !t.is_empty() && self.history.last() != Some(&t) {
+                        self.history.push(t);
+                    }
+                }
+                Err(e) => {
+                    // Hatalı filtre uygulanmaz; satır açık kalır.
+                    self.input = Some(InputLine {
+                        state: FilterState::Invalid(e),
+                        ..inp
+                    });
+                }
+            },
+            InputKind::Command => {
+                self.run_command(&inp.text);
+                self.command_text = inp.text;
+            }
+        }
+    }
+
+    /// Filtre satırını yeniden doğrular (her tuşta).
+    fn revalidate(&mut self) {
+        if let Some(inp) = self.input.as_mut() {
+            if inp.kind == InputKind::Filter {
+                inp.state = if inp.text.trim().is_empty() {
+                    FilterState::Empty
+                } else {
+                    match pakiz_filter::validate(&inp.text, &self.catalog) {
+                        Ok(()) => FilterState::Valid,
+                        Err(e) => FilterState::Invalid(e),
+                    }
+                };
+            }
+        }
+    }
+
+    /// Tab: sondaki kelimeyi alan adlarıyla tamamlar. Tek aday → tamamla; çok aday →
+    /// ortak önek + aday listesi; ardışık Tab adaylar arasında döner.
+    fn complete_input(&mut self) {
+        let Some(inp) = self.input.as_mut() else {
+            return;
+        };
+        if let Some(c) = self.completion.as_mut() {
+            let i = c.index.map_or(0, |i| (i + 1) % c.candidates.len());
+            c.index = Some(i);
+            inp.text.truncate(c.start);
+            inp.text.push_str(c.candidates[i]);
+            return;
+        }
+        let start = inp
+            .text
+            .char_indices()
+            .rev()
+            .find(|&(_, ch)| !(ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-')))
+            .map_or(0, |(i, ch)| i + ch.len_utf8());
+        let word = &inp.text[start..];
+        let candidates: Vec<&'static str> = complete(word, &self.catalog)
+            .iter()
+            .map(|d| d.name)
+            .collect();
+        let Some(&first) = candidates.first() else {
+            return;
+        };
+        let prefix = candidates.iter().fold(first, |acc, c| {
+            let n = acc
+                .bytes()
+                .zip(c.bytes())
+                .take_while(|(a, b)| a == b)
+                .count();
+            &acc[..n]
+        });
+        inp.text.truncate(start);
+        inp.text.push_str(prefix);
+        if candidates.len() > 1 {
+            self.completion = Some(Completion {
+                start,
+                candidates,
+                index: None,
+            });
         }
     }
 
@@ -451,7 +707,7 @@ impl App {
                         let top = self.areas.list.y + 2;
                         if m.row >= top {
                             let idx = self.list_offset + usize::from(m.row - top);
-                            if idx < self.store.len() {
+                            if idx < self.shown.len() {
                                 self.autoscroll = false;
                                 self.select(idx);
                             }
@@ -475,4 +731,9 @@ impl App {
             _ => {}
         }
     }
+}
+
+/// Paket numarasını store indeksine çevirir (`n >= first`).
+fn index_of(n: u64, first: u64) -> usize {
+    usize::try_from(n - first).unwrap_or(usize::MAX)
 }

@@ -12,6 +12,7 @@ pakiz-dissect = { path = "crates/dissect" }
 pakiz-capture = { path = "crates/capture" }
 pakiz-tui = { path = "crates/tui" }
 pakiz-storage = { path = "crates/storage" }
+pakiz-filter = { path = "crates/filter" }
 signal-hook = "0.3"
 ratatui = "0.30"
 libc = "0.2"

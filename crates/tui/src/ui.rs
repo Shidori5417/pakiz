@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table};
 use ratatui::Frame;
 
-use crate::app::{App, InputKind, Panel};
+use crate::app::{App, FilterState, InputKind, InputLine, Panel};
 use crate::theme::Theme;
 use crate::tree::highlight_range;
 
@@ -21,7 +21,7 @@ const HELP: &[(&str, &str)] = &[
     ("h / l, ← / →", "kapa / aç"),
     ("p", "duraklat / devam"),
     ("a", "otomatik kaydırma"),
-    ("/", "filtre (Aşama 5)"),
+    ("/", "filtre (Tab tamamla, ↑/↓ geçmiş)"),
     (":", "komut (:q çıkış, :w dosya)"),
     ("?", "bu yardım"),
     ("q", "çıkış"),
@@ -74,16 +74,97 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_tree(f, app, tree);
     draw_hex(f, app, hex);
     if let Some(inp) = &app.input {
-        let prefix = match inp.kind {
-            InputKind::Filter => "/",
-            InputKind::Command => ":",
-        };
-        f.render_widget(Paragraph::new(format!("{prefix}{}█", inp.text)), input);
+        f.render_widget(input_line(inp, &app.theme), input);
     }
     draw_status(f, app, status);
+    draw_completion(f, app, input);
     if app.show_help {
         draw_help(f, &app.theme);
     }
+}
+
+/// Giriş satırı. Filtrede arka plan geçerliyse yeşil, hatalıysa kırmızı; hata
+/// aralığının altı çizilir.
+fn input_line<'a>(inp: &'a InputLine, theme: &Theme) -> Paragraph<'a> {
+    let prefix = match inp.kind {
+        InputKind::Filter => "/",
+        InputKind::Command => ":",
+    };
+    let t = inp.text.as_str();
+    let mut spans = vec![Span::raw(prefix)];
+    let mut bg = Style::default();
+    let mut cursor = Span::raw("█");
+    if inp.kind == InputKind::Filter {
+        match &inp.state {
+            FilterState::Empty => {}
+            FilterState::Valid => bg = bg.bg(theme.filter_ok_bg),
+            FilterState::Invalid(e) => {
+                bg = bg.bg(theme.filter_err_bg);
+                let err = Style::default()
+                    .fg(ratatui::style::Color::Yellow)
+                    .add_modifier(Modifier::UNDERLINED | Modifier::BOLD);
+                let s = e.span.start.min(t.len());
+                let end = e.span.end.clamp(s, t.len());
+                if let (Some(a), Some(m), Some(b)) = (t.get(..s), t.get(s..end), t.get(end..)) {
+                    spans.push(Span::raw(a));
+                    spans.push(Span::styled(m, err));
+                    spans.push(Span::raw(b));
+                    if s == end {
+                        // Boş aralık (ör. eksik değer): imleci işaretle.
+                        cursor = Span::styled("█", err);
+                    }
+                } else {
+                    spans.push(Span::raw(t));
+                }
+            }
+        }
+    }
+    if spans.len() == 1 {
+        spans.push(Span::raw(t));
+    }
+    spans.push(cursor);
+    Paragraph::new(Line::from(spans)).style(bg)
+}
+
+/// Birden çok tamamlama adayı varsa giriş satırının üstünde açılır liste.
+fn draw_completion(f: &mut Frame, app: &App, input: Rect) {
+    const MAX: usize = 8;
+    let Some(comp) = &app.completion else {
+        return;
+    };
+    let sel = comp.index.unwrap_or(0);
+    let skip = (sel + 1).saturating_sub(MAX);
+    let shown = comp.candidates.len().min(MAX);
+    let h = u16::try_from(shown + 2).unwrap_or(u16::MAX).min(input.y);
+    let w = comp
+        .candidates
+        .iter()
+        .map(|n| n.len())
+        .max()
+        .unwrap_or(0)
+        .saturating_add(4);
+    let w = u16::try_from(w).unwrap_or(u16::MAX).min(input.width);
+    let popup = Rect::new(input.x, input.y - h, w, h);
+    let lines: Vec<Line> = comp
+        .candidates
+        .iter()
+        .enumerate()
+        .skip(skip)
+        .take(MAX)
+        .map(|(i, n)| {
+            let mut st = Style::default();
+            if comp.index == Some(i) {
+                st = st.bg(app.theme.selected_bg).add_modifier(Modifier::BOLD);
+            }
+            Line::styled(*n, st)
+        })
+        .collect();
+    let title = format!(" {} aday ", comp.candidates.len());
+    f.render_widget(Clear, popup);
+    f.render_widget(
+        Paragraph::new(lines).block(block(&title, true, &app.theme)),
+        popup,
+    );
 }
 
 fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
@@ -91,12 +172,12 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     if let Some(sel) = app.selected {
         keep_visible(&mut app.list_offset, sel, visible);
     }
-    let max_off = app.store.len().saturating_sub(visible);
+    let max_off = app.displayed_len().saturating_sub(visible);
     app.list_offset = app.list_offset.min(max_off);
     let theme = &app.theme;
-    let end = (app.list_offset + visible).min(app.store.len());
+    let end = (app.list_offset + visible).min(app.displayed_len());
     let rows = (app.list_offset..end).filter_map(|i| {
-        let e = app.store.get(i)?;
+        let e = app.store.get(app.store_index(i)?)?;
         let s = &e.summary;
         let mut style = Style::default().fg(theme.protocol_color(s.protocol, e.malformed));
         if Some(i) == app.selected {
@@ -225,7 +306,7 @@ fn draw_hex(f: &mut Frame, app: &mut App, area: Rect) {
     let row = app.selected_row();
     let focused = app.focus == Panel::Hex;
     let theme = app.theme.clone();
-    let Some(e) = app.selected.and_then(|i| app.store.get(i)) else {
+    let Some(e) = app.selected_index().and_then(|i| app.store.get(i)) else {
         f.render_widget(
             Paragraph::new("").block(block(" Hex ", focused, &theme)),
             area,
@@ -261,12 +342,31 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!(
-            "│ toplam: {} gösterilen: {} │ düşen: {} ",
+            "│ gösterilen/toplam: {}/{} │ düşen: {} ",
+            app.displayed_len(),
             app.store.total() + app.pending_len() as u64,
-            app.store.len(),
             app.dropped()
         )),
     ];
+    if let Some(InputLine {
+        kind: InputKind::Filter,
+        state: FilterState::Invalid(e),
+        ..
+    }) = &app.input
+    {
+        parts.push(Span::styled(
+            format!("│ hata: {} ", e.msg),
+            Style::default()
+                .fg(app.theme.malformed)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if let Some(pct) = app.filter_progress() {
+        parts.push(Span::styled(
+            format!("│ filtreleniyor %{pct} "),
+            Style::default().fg(app.theme.arp),
+        ));
+    }
     if app.paused {
         parts.push(Span::styled(
             format!("│ PAUSED (+{}) ", app.pending_len()),

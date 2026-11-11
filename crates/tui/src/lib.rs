@@ -27,7 +27,10 @@ use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, List, ListState};
 use ratatui::Terminal;
 
-pub use app::{App, InputKind, InputLine, Panel, DRAIN_BATCH, INDEX_BATCH};
+pub use app::{
+    App, Completion, FilterState, InputKind, InputLine, Panel, DRAIN_BATCH, FILTER_BATCH,
+    INDEX_BATCH,
+};
 pub use keymap::{Action, Keymap};
 pub use source::{PacketSource, VecSource};
 pub use store::{Entry, PacketStore};

@@ -1,5 +1,7 @@
 //! `pakiz` — terminal paket analizörü (varsayılan TUI, `--no-tui` satır çıktısı, `--count` sayaç).
 
+#![cfg_attr(test, allow(clippy::unwrap_used))]
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -10,6 +12,7 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use pakiz_capture::{list_interfaces, start_capture, CaptureConfig, CaptureHandle, CaptureMode};
 use pakiz_dissect::{RawPacket, Registry};
+use pakiz_filter::{bpf, FieldCatalog, Filter, FilterError};
 use pakiz_storage::{CaptureReader, CaptureWriter, Format, IndexedFile};
 use pakiz_tui::{App, PacketSource, Tui};
 use tokio::signal::unix::{signal, SignalKind};
@@ -42,6 +45,13 @@ struct Cli {
     /// `TPACKET_V3` yerine `recvfrom` kullan
     #[arg(long)]
     force_recv: bool,
+    /// Display filter (ör. `tcp.port == 443`): TUI başlangıç filtresi; `--no-tui` ve
+    /// `-r ... -w` dönüşümünde yalnızca eşleşenler
+    #[arg(short = 'Y', long = "display-filter", conflicts_with = "count")]
+    display_filter: Option<String>,
+    /// Yakalama filtresi, kernel'de klasik BPF (ör. `tcp port 80 and host 10.0.0.1`)
+    #[arg(short = 'f', long = "capture-filter", conflicts_with = "read")]
+    capture_filter: Option<String>,
     /// TUI'de bellekte tutulacak en fazla paket (eskiler düşer)
     #[arg(long, default_value_t = pakiz_tui::PacketStore::DEFAULT_MAX)]
     max_packets: usize,
@@ -107,10 +117,76 @@ fn spawn_writer(
     Ok((ui_rx, h))
 }
 
-fn print_line(reg: &Registry, number: u64, first: &mut Option<SystemTime>, p: &RawPacket) {
+/// Filtre hatasını kaynak + konum işaretiyle biçimler.
+fn filter_error(kind: &str, src: &str, e: &FilterError) -> anyhow::Error {
+    let col = src.get(..e.span.start).map_or(0, |s| s.chars().count());
+    let width = src
+        .get(e.span.clone())
+        .map_or(1, |s| s.chars().count().max(1));
+    anyhow::anyhow!(
+        "{kind} hatası: {} (sütun {})\n  {src}\n  {}{}",
+        e.msg,
+        col + 1,
+        " ".repeat(col),
+        "^".repeat(width)
+    )
+}
+
+fn display_filter(cli: &Cli) -> Result<Option<Filter>> {
+    cli.display_filter
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(|src| {
+            Filter::compile(src, &FieldCatalog::default())
+                .map_err(|e| filter_error("display filter (-Y)", src, &e))
+        })
+        .transpose()
+}
+
+/// `-f` ifadesini derleyip kernel'in `struct sock_filter` dizisine çevirir.
+fn capture_filter(src: &str) -> Result<Vec<pakiz_capture::sock_filter>> {
+    let prog = bpf::compile(src).map_err(|e| filter_error("yakalama filtresi (-f)", src, &e))?;
+    Ok(to_sock_filter(&prog))
+}
+
+fn to_sock_filter(prog: &[bpf::SockFilter]) -> Vec<pakiz_capture::sock_filter> {
+    prog.iter()
+        .map(|i| pakiz_capture::sock_filter {
+            code: i.code,
+            jt: i.jt,
+            jf: i.jf,
+            k: i.k,
+        })
+        .collect()
+}
+
+/// Paketi bir kez ayrıştırır; filtre yoksa veya eşleşirse satırı yazar ve `true` döner.
+fn emit(
+    reg: &Registry,
+    filter: Option<&Filter>,
+    print: bool,
+    number: u64,
+    first: &mut Option<SystemTime>,
+    p: &RawPacket,
+) -> bool {
+    let d = reg.dissect_numbered(p, Some(number));
+    if filter.is_some_and(|f| !f.matches(&d, p)) {
+        return false;
+    }
+    if print {
+        print_line(&d.summary, number, first, p);
+    }
+    true
+}
+
+fn print_line(
+    s: &pakiz_dissect::Summary,
+    number: u64,
+    first: &mut Option<SystemTime>,
+    p: &RawPacket,
+) {
     let t0 = *first.get_or_insert(p.ts);
     let rel = p.ts.duration_since(t0).unwrap_or_default().as_secs_f64();
-    let s = reg.dissect(p).summary;
     println!(
         "{number:>6} {rel:>11.6} {} → {} {} {} {}",
         s.src, s.dst, s.protocol, s.len, s.info
@@ -122,21 +198,23 @@ fn run_read(path: &Path, cli: &Cli) -> Result<()> {
     let mut reader =
         CaptureReader::open(path).with_context(|| format!("{} açılamadı", path.display()))?;
     let mut writer = cli.write.as_deref().map(create_writer).transpose()?;
+    let filter = display_filter(cli)?;
     let reg = Registry::default();
-    let mut number = 0u64;
+    let (mut number, mut written) = (0u64, 0u64);
     let mut first = None;
     while let Some(p) = reader.next_packet().context("dosya okunamadı")? {
         number += 1;
-        if cli.no_tui {
-            print_line(&reg, number, &mut first, &p);
+        if !emit(&reg, filter.as_ref(), cli.no_tui, number, &mut first, &p) {
+            continue;
         }
         if let Some(w) = writer.as_mut() {
             w.write_packet(&p).context("dosyaya yazılamadı")?;
+            written += 1;
         }
     }
     if let (Some(w), Some(out)) = (writer.as_mut(), cli.write.as_deref()) {
         w.flush().context("dosyaya yazılamadı")?;
-        eprintln!("{number} paket yazıldı: {}", out.display());
+        eprintln!("{written} paket yazıldı: {}", out.display());
     }
     Ok(())
 }
@@ -163,6 +241,11 @@ fn open(
     let mut cfg = CaptureConfig::new(iface);
     cfg.promisc = !cli.no_promisc;
     cfg.force_recv = cli.force_recv;
+    cfg.filter = cli
+        .capture_filter
+        .as_deref()
+        .map(capture_filter)
+        .transpose()?;
     let (rx, handle) = start_capture(&cfg)?;
     match handle.mode() {
         _ if quiet => {}
@@ -222,6 +305,7 @@ async fn run_count(iface: String, cli: &Cli) -> Result<()> {
 }
 
 async fn run_lines(iface: String, cli: &Cli) -> Result<()> {
+    let filter = display_filter(cli)?;
     let mut writer = cli.write.as_deref().map(create_writer).transpose()?;
     let (rx, handle) = open(iface, cli, false)?;
     let reg = Registry::default();
@@ -230,7 +314,9 @@ async fn run_lines(iface: String, cli: &Cli) -> Result<()> {
     run_loop(handle, Duration::from_millis(20), |_| {
         for p in rx.try_iter() {
             number += 1;
-            print_line(&reg, number, &mut first, &p);
+            if !emit(&reg, filter.as_ref(), true, number, &mut first, &p) {
+                continue;
+            }
             if let Some(w) = writer.as_mut() {
                 w.write_packet(&p).context("dosyaya yazılamadı")?;
             }
@@ -249,9 +335,11 @@ async fn main() -> Result<()> {
     if cli.list_interfaces {
         return print_interfaces();
     }
+    // Terminal hazırlanmadan önce filtre hatalarını bildir.
+    display_filter(&cli)?;
     if let Some(path) = cli.read.as_deref() {
         if !cli.no_tui && cli.write.is_none() {
-            return run_tui_file(path);
+            return run_tui_file(path, &cli);
         }
         return run_read(path, &cli);
     }
@@ -270,6 +358,9 @@ async fn main() -> Result<()> {
 
 /// TUI modu; `-i` yoksa önce arayüz seçtirir. `Tui` drop edilince terminal geri yüklenir.
 fn run_tui(cli: &Cli) -> Result<()> {
+    if let Some(src) = cli.capture_filter.as_deref() {
+        capture_filter(src)?;
+    }
     let mut tui = Tui::new().context("terminal hazırlanamadı")?;
     let iface = if let Some(i) = cli.interface.clone() {
         i
@@ -308,6 +399,7 @@ fn run_tui(cli: &Cli) -> Result<()> {
         ui_dropped,
     };
     let mut app = App::new(Box::new(src), cli.max_packets);
+    set_initial_filter(&mut app, cli)?;
     let res = tui.run(&mut app);
     // Kaynağı bırakmak yakalamayı durdurur; yazıcı kanal kapanınca bitip flush eder.
     drop(app);
@@ -324,10 +416,80 @@ fn run_tui(cli: &Cli) -> Result<()> {
 }
 
 /// `-r` ile TUI: dosya indeksli açılır, paketler gerektiğinde diskten okunur.
-fn run_tui_file(path: &Path) -> Result<()> {
+fn run_tui_file(path: &Path, cli: &Cli) -> Result<()> {
     let file = IndexedFile::open(path).with_context(|| format!("{} açılamadı", path.display()))?;
-    let mut tui = Tui::new().context("terminal hazırlanamadı")?;
     let mut app = App::from_file(file, path.display().to_string());
+    set_initial_filter(&mut app, cli)?;
+    let mut tui = Tui::new().context("terminal hazırlanamadı")?;
     tui.run(&mut app)?;
     Ok(())
+}
+
+fn set_initial_filter(app: &mut App, cli: &Cli) -> Result<()> {
+    if let Some(src) = cli.display_filter.as_deref() {
+        app.set_filter(src)
+            .map_err(|e| filter_error("display filter (-Y)", src, &e))?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_filter_converts_to_kernel_struct() {
+        let prog = bpf::compile("icmp").unwrap();
+        let k = capture_filter("icmp").unwrap();
+        assert_eq!(k.len(), prog.len());
+        for (a, b) in prog.iter().zip(&k) {
+            assert_eq!((a.code, a.jt, a.jf, a.k), (b.code, b.jt, b.jf, b.k));
+        }
+        let e = capture_filter("tcp port").unwrap_err().to_string();
+        assert!(
+            e.contains("yakalama filtresi (-f)") && e.contains('^'),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn display_filter_error_has_position() {
+        let cli = Cli::parse_from(["pakiz", "-Y", "ip.ttl =="]);
+        let e = display_filter(&cli).unwrap_err().to_string();
+        assert!(
+            e.contains("display filter (-Y) hatası") && e.contains("sütun"),
+            "{e}"
+        );
+        let cli = Cli::parse_from(["pakiz", "-Y", "icmp.type == 8"]);
+        assert!(display_filter(&cli).unwrap().is_some());
+    }
+
+    /// Canlı: `lo` üzerinde `udp and port 47999` filtresi kernel'e bağlanır; başka
+    /// porta giden UDP gelmez. Yetki yoksa (`CAP_NET_RAW`) atlanır; ör.
+    /// `unshare -rn sh -c 'ip link set lo up; cargo test -p pakiz-bin'`.
+    #[test]
+    fn capture_filter_attached_live() {
+        let mut cfg = CaptureConfig::new("lo");
+        cfg.promisc = false;
+        cfg.force_recv = true;
+        cfg.filter = Some(capture_filter("udp and port 47999").unwrap());
+        let Ok((rx, handle)) = start_capture(&cfg) else {
+            eprintln!("atlandı: lo üzerinde yakalama izni yok");
+            return;
+        };
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        for _ in 0..3 {
+            sock.send_to(b"x", "127.0.0.1:47998").unwrap();
+            sock.send_to(b"y", "127.0.0.1:47999").unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        let reg = Registry::default();
+        let got: Vec<String> = rx
+            .try_iter()
+            .map(|p| reg.dissect(&p).summary.info)
+            .collect();
+        handle.stop().unwrap();
+        assert!(!got.is_empty(), "filtreye uyan paket gelmedi");
+        assert!(got.iter().all(|i| i.contains("47999")), "{got:?}");
+    }
 }
