@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+pakiz-dissect.workspace = true
+ratatui.workspace = true
 
 [lints]
 workspace = true
