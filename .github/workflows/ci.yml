@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt / clippy / test / bench
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+      - name: cargo clippy (pedantic)
+        run: cargo clippy --workspace --all-targets -- -W clippy::pedantic -D warnings
+      - name: cargo test
+        run: cargo test --workspace
+      - name: cargo bench --no-run
+        run: cargo bench --workspace --no-run
+
+  fuzz:
+    name: fuzz (${{ matrix.target }}, 60 sn)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - crate: dissect
+            target: dissect_frame
+          - crate: filter
+            target: filter_parse
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/${{ matrix.crate }}/fuzz
+      - name: cargo-fuzz kur
+        run: cargo install cargo-fuzz --locked
+      - name: ${{ matrix.target }} çalıştır
+        working-directory: crates/${{ matrix.crate }}
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=60
+      - name: Çökme girdilerini sakla
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: crates/${{ matrix.crate }}/fuzz/artifacts

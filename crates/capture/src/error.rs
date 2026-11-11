@@ -40,3 +40,26 @@ pub(crate) fn from_io(op: &'static str, source: io::Error) -> CaptureError {
         _ => CaptureError::Io { op, source },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn permission_error_suggests_setcap() {
+        for errno in [libc::EPERM, libc::EACCES] {
+            let e = from_io("socket(AF_PACKET)", io::Error::from_raw_os_error(errno));
+            assert!(matches!(e, CaptureError::Permission { .. }));
+            let m = e.to_string();
+            assert!(m.starts_with("socket(AF_PACKET): yetki yok."), "{m}");
+            assert!(
+                m.contains("CAP_NET_RAW")
+                    && m.contains("sudo setcap cap_net_raw,cap_net_admin=eip /"),
+                "{m}"
+            );
+        }
+        let e = from_io("bind", io::Error::from_raw_os_error(libc::ENODEV));
+        assert!(matches!(e, CaptureError::Io { op: "bind", .. }));
+        assert!(e.to_string().starts_with("bind: "));
+    }
+}

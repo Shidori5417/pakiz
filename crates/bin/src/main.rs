@@ -9,7 +9,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{bail, Context, Result};
-use clap::Parser;
+use clap::{ArgAction, Parser};
 use pakiz_capture::{list_interfaces, start_capture, CaptureConfig, CaptureHandle, CaptureMode};
 use pakiz_dissect::RawPacket;
 use pakiz_filter::{bpf, Filter, FilterError};
@@ -18,26 +18,61 @@ use pakiz_storage::{CaptureReader, CaptureWriter, Format, IndexedFile};
 use pakiz_tui::{catalog, fmt_bytes, Analyzer, App, PacketSource, Tui};
 use tokio::signal::unix::{signal, SignalKind};
 
+mod config;
+
+const HELP_TEMPLATE: &str = "\
+{name} {version} — {about}
+
+Kullanım: {usage}
+
+Seçenekler:
+{options}{after-help}";
+
+const AFTER_HELP: &str = "\
+Örnekler:
+  pakiz                              arayüz seçip canlı TUI
+  pakiz -i eth0 -f 'tcp port 443'    kernel BPF filtresiyle yakala
+  pakiz -r yakalama.pcapng -Y dns    dosyayı TUI'de aç, DNS süz
+  pakiz -i eth0 --no-tui -w out.pcap satır çıktısı + dosyaya yaz
+  pakiz -r a.pcap -Y 'http' -w b.pcapng   süzerek dönüştür
+
+Config: $XDG_CONFIG_HOME/pakiz/config.toml (yoksa ~/.config/pakiz/config.toml);
+varsayılanı görmek için --dump-config. Canlı yakalama CAP_NET_RAW ister:
+  sudo setcap cap_net_raw,cap_net_admin=eip $(command -v pakiz)";
+
 #[derive(Debug, Parser)]
-#[command(name = "pakiz", version, about = "Linux için terminal paket analizörü")]
+#[command(
+    name = "pakiz",
+    version,
+    about = "Linux için terminal paket analizörü",
+    help_template = HELP_TEMPLATE,
+    override_usage = "pakiz [SEÇENEKLER]",
+    after_help = AFTER_HELP,
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
 #[allow(clippy::struct_excessive_bools)]
 struct Cli {
-    /// Yakalanacak arayüz
-    #[arg(short = 'i', long = "interface")]
+    #[arg(
+        help = "Yakalanacak arayüz (config: general.default_interface)",
+        short = 'i',
+        long = "interface",
+        value_name = "ARAYÜZ"
+    )]
     interface: Option<String>,
-    /// pcap/pcapng dosyasından oku
-    #[arg(short = 'r', long = "read", conflicts_with_all = ["interface", "count"])]
+    /// pcap/pcapng dosyasından oku (canlı yakalama yerine)
+    #[arg(short = 'r', long = "read", value_name = "DOSYA", conflicts_with_all = ["interface", "count"])]
     read: Option<PathBuf>,
-    /// Paketleri dosyaya yaz (`.pcapng` → pcapng, diğerleri pcap)
-    #[arg(short = 'w', long = "write")]
+    /// Paketleri dosyaya yaz (`.pcapng` uzantısı → pcapng, diğerleri pcap)
+    #[arg(short = 'w', long = "write", value_name = "DOSYA")]
     write: Option<PathBuf>,
     /// Arayüzleri listele ve çık
     #[arg(long)]
     list_interfaces: bool,
-    /// Ham paket sayacı modu
+    /// Ham paket sayacı modu (saniyede bir özet)
     #[arg(long, conflicts_with = "no_tui")]
     count: bool,
-    /// Her paketi tek satır yaz (TUI yokken varsayılan)
+    /// TUI açma; her paketi tek satır olarak stdout'a yaz
     #[arg(long)]
     no_tui: bool,
     /// Promiscuous modu açma
@@ -46,22 +81,52 @@ struct Cli {
     /// `TPACKET_V3` yerine `recvfrom` kullan
     #[arg(long)]
     force_recv: bool,
-    /// Display filter (ör. `tcp.port == 443`): TUI başlangıç filtresi; `--no-tui` ve
-    /// `-r ... -w` dönüşümünde yalnızca eşleşenler
-    #[arg(short = 'Y', long = "display-filter", conflicts_with = "count")]
+    /// Display filter (ör. `tcp.port == 443`): TUI başlangıç filtresi; `--no-tui` ve `-r ... -w` dönüşümünde yalnızca eşleşenler
+    #[arg(
+        short = 'Y',
+        long = "display-filter",
+        value_name = "FİLTRE",
+        conflicts_with = "count"
+    )]
     display_filter: Option<String>,
-    /// Yakalama filtresi, kernel'de klasik BPF (ör. `tcp port 80 and host 10.0.0.1`)
-    #[arg(short = 'f', long = "capture-filter", conflicts_with = "read")]
+    /// Yakalama filtresi, kernel'de klasik BPF (ör. `udp port 53`, `tcp port 80 and host 10.0.0.1`)
+    #[arg(
+        short = 'f',
+        long = "capture-filter",
+        value_name = "FİLTRE",
+        conflicts_with = "read"
+    )]
     capture_filter: Option<String>,
-    /// TUI'de bellekte tutulacak en fazla paket (eskiler düşer)
-    #[arg(long, default_value_t = pakiz_tui::PacketStore::DEFAULT_MAX)]
-    max_packets: usize,
+    #[arg(
+        help = "TUI'de bellekte tutulacak en fazla paket, eskiler düşer (config: general.max_packets)",
+        long,
+        value_name = "N"
+    )]
+    max_packets: Option<usize>,
     /// IP adresleri yerine DNS cevaplarından öğrenilen adları göster (TUI'de `n`)
     #[arg(short = 'n', long = "resolve")]
     resolve: bool,
     /// Sonda özet istatistik yaz (protokol dağılımı, top talkers); TUI açılmaz
     #[arg(long, conflicts_with = "count")]
     stats: bool,
+    /// Renk teması: dark, light (config: theme.name)
+    #[arg(long, value_name = "AD")]
+    theme: Option<String>,
+    #[arg(
+        help = "Config dosyası (varsayılan: $XDG_CONFIG_HOME/pakiz/config.toml)",
+        long,
+        value_name = "YOL"
+    )]
+    config: Option<PathBuf>,
+    /// Varsayılan config'i stdout'a yaz ve çık
+    #[arg(long)]
+    dump_config: bool,
+    /// Bu yardımı göster
+    #[arg(short = 'h', long = "help", action = ArgAction::Help)]
+    help: Option<bool>,
+    /// Sürümü göster
+    #[arg(short = 'V', long = "version", action = ArgAction::Version)]
+    version: Option<bool>,
 }
 
 /// Canlı yakalama kaynağı: kanal + kernel istatistikleri.
@@ -431,9 +496,34 @@ async fn run_lines(iface: String, cli: &Cli) -> Result<()> {
     Ok(())
 }
 
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("pakiz: {e:#}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<()> {
-    let cli = Cli::parse();
+async fn run() -> Result<()> {
+    let mut cli = Cli::parse();
+    if cli.dump_config {
+        print!("{}", config::dump());
+        return Ok(());
+    }
+    // Config (yoksa varsayılanlar); CLI bayrakları ezer.
+    let settings = config::load(cli.config.as_deref(), cli.theme.as_deref())?;
+    if cli.max_packets == Some(0) {
+        bail!("--max-packets en az 1 olmalı");
+    }
+    if cli.interface.is_none() && cli.read.is_none() {
+        cli.interface
+            .clone_from(&settings.general.default_interface);
+    }
+    cli.resolve |= settings.general.resolve_names;
+    cli.max_packets = cli.max_packets.or(Some(settings.general.max_packets));
     if cli.list_interfaces {
         return print_interfaces();
     }
@@ -441,12 +531,12 @@ async fn main() -> Result<()> {
     display_filter(&cli)?;
     if let Some(path) = cli.read.as_deref() {
         if !cli.no_tui && cli.write.is_none() && !cli.stats {
-            return run_tui_file(path, &cli);
+            return run_tui_file(path, &cli, settings);
         }
         return run_read(path, &cli);
     }
     if !cli.count && !cli.no_tui && !cli.stats {
-        return run_tui(&cli);
+        return run_tui(&cli, settings);
     }
     let Some(iface) = cli.interface.clone() else {
         bail!("arayüz gerekli: -i <arayüz> (listelemek için --list-interfaces)");
@@ -459,7 +549,7 @@ async fn main() -> Result<()> {
 }
 
 /// TUI modu; `-i` yoksa önce arayüz seçtirir. `Tui` drop edilince terminal geri yüklenir.
-fn run_tui(cli: &Cli) -> Result<()> {
+fn run_tui(cli: &Cli, settings: config::Settings) -> Result<()> {
     if let Some(src) = cli.capture_filter.as_deref() {
         capture_filter(src)?;
     }
@@ -500,10 +590,13 @@ fn run_tui(cli: &Cli) -> Result<()> {
         handle,
         ui_dropped,
     };
-    let mut app = App::new(Box::new(src), cli.max_packets);
+    let mut app = App::new(
+        Box::new(src),
+        cli.max_packets.unwrap_or(settings.general.max_packets),
+    );
     app.enable_live();
-    app.resolve_names = cli.resolve;
-    set_initial_filter(&mut app, cli)?;
+    app.autoscroll = settings.general.autoscroll;
+    apply_settings(&mut app, &mut tui, cli, settings)?;
     let res = tui.run(&mut app);
     // Kaynağı bırakmak yakalamayı durdurur; yazıcı kanal kapanınca bitip flush eder.
     drop(app);
@@ -520,14 +613,30 @@ fn run_tui(cli: &Cli) -> Result<()> {
 }
 
 /// `-r` ile TUI: dosya indeksli açılır, paketler gerektiğinde diskten okunur.
-fn run_tui_file(path: &Path, cli: &Cli) -> Result<()> {
+fn run_tui_file(path: &Path, cli: &Cli, settings: config::Settings) -> Result<()> {
     let file = IndexedFile::open(path).with_context(|| format!("{} açılamadı", path.display()))?;
     let mut app = App::from_file(file, path.display().to_string());
-    app.resolve_names = cli.resolve;
+    // Filtre hatası terminal hazırlanmadan bildirilsin.
     set_initial_filter(&mut app, cli)?;
     let mut tui = Tui::new().context("terminal hazırlanamadı")?;
+    apply_settings(&mut app, &mut tui, cli, settings)?;
     tui.run(&mut app)?;
     Ok(())
+}
+
+/// Config'ten gelen tema, tuşlar, renklendirme ve fps; ad çözümleme ve başlangıç filtresi.
+fn apply_settings(
+    app: &mut App,
+    tui: &mut Tui,
+    cli: &Cli,
+    settings: config::Settings,
+) -> Result<()> {
+    app.keymap = settings.keymap;
+    app.set_theme(settings.theme, settings.coloring)
+        .map_err(|e| anyhow::anyhow!("yerleşik renklendirme kuralı derlenemedi: {}", e.msg))?;
+    app.resolve_names = cli.resolve;
+    tui.set_fps(settings.general.fps);
+    set_initial_filter(app, cli)
 }
 
 fn set_initial_filter(app: &mut App, cli: &Cli) -> Result<()> {

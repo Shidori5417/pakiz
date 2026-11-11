@@ -396,7 +396,10 @@ impl Ring {
                 let h = &(*bd).hdr.bh1;
                 (h.num_pkts, h.offset_to_first_pkt as usize)
             };
-            self.walk_block(block, num, first, sock.ifindex(), skip_outgoing, &mut emit);
+            // SAFETY: block map edilen bölgenin içinde, `block_size` bayt; TP_STATUS_USER
+            // görüldüğü için status geri yazılana kadar kernel bu bölgeye yazmaz.
+            let bytes = unsafe { std::slice::from_raw_parts(block, self.block_size) };
+            parse_block(bytes, num, first, sock.ifindex(), skip_outgoing, &mut emit);
             fence(Ordering::Release);
             // SAFETY: block'u kernel'e geri veriyoruz; status_ptr geçerli.
             unsafe { ptr::write_volatile(status_ptr, libc::TP_STATUS_KERNEL) };
@@ -404,52 +407,69 @@ impl Ring {
         }
         Ok(())
     }
+}
 
-    fn walk_block(
-        &self,
-        block: *mut u8,
-        num: u32,
-        mut off: usize,
-        ifindex: u32,
-        skip_outgoing: bool,
-        emit: &mut impl FnMut(RawPacket),
-    ) {
-        let hdr_len = size_of::<libc::tpacket3_hdr>();
-        let sll_off = (hdr_len + libc::TPACKET_ALIGNMENT - 1) & !(libc::TPACKET_ALIGNMENT - 1);
-        for _ in 0..num {
-            if off + sll_off + size_of::<libc::sockaddr_ll>() > self.block_size {
-                return;
-            }
-            // SAFETY: off + başlık block sınırları içinde (yukarıda kontrol edildi);
-            // hizalama garantisi için read_unaligned kullanılır.
-            let h = unsafe { ptr::read_unaligned(block.add(off).cast::<libc::tpacket3_hdr>()) };
-            // SAFETY: sockaddr_ll, başlıktan sonra TPACKET_ALIGN ile hizalı ofsette ve
-            // block içinde (yukarıda kontrol edildi).
-            let sll = unsafe {
-                ptr::read_unaligned(block.add(off + sll_off).cast::<libc::sockaddr_ll>())
-            };
-            let start = off + usize::from(h.tp_mac);
-            let len = h.tp_snaplen as usize;
-            if start + len > self.block_size {
-                return;
-            }
-            if !(skip_outgoing && sll.sll_pkttype == libc::PACKET_OUTGOING) {
-                // SAFETY: [start, start+len) block içinde (yukarıda kontrol edildi) ve
-                // block kullanıcıya ait olduğu sürece kernel bu bölgeye yazmaz.
-                let data = unsafe { std::slice::from_raw_parts(block.add(start), len) };
-                emit(RawPacket {
-                    ts: SystemTime::UNIX_EPOCH
-                        + Duration::new(u64::from(h.tp_sec), h.tp_nsec.min(999_999_999)),
-                    data: data.to_vec(),
-                    orig_len: h.tp_len,
-                    ifindex: u32::try_from(sll.sll_ifindex).unwrap_or(ifindex),
-                });
-            }
-            if h.tp_next_offset == 0 {
-                return;
-            }
-            off += h.tp_next_offset as usize;
+fn rd_u16(b: &[u8], off: usize) -> Option<u16> {
+    Some(u16::from_ne_bytes(b.get(off..off + 2)?.try_into().ok()?))
+}
+
+fn rd_u32(b: &[u8], off: usize) -> Option<u32> {
+    Some(u32::from_ne_bytes(b.get(off..off + 4)?.try_into().ok()?))
+}
+
+/// Kullanıcıya verilmiş bir `TPACKET_V3` block'undaki paketleri (saf, `unsafe` yok)
+/// ayrıştırır: `off` ilk paketin ofseti (`offset_to_first_pkt`), `num` paket sayısı.
+/// Her paket `tpacket3_hdr` + `TPACKET_ALIGN`li `sockaddr_ll` + veri; sınır dışına
+/// taşan başlık/veri veya `tp_next_offset == 0` yürümeyi bitirir.
+/// `skip_outgoing`: `PACKET_OUTGOING` paketleri atla (loopback'te çift görmemek için).
+pub(crate) fn parse_block(
+    block: &[u8],
+    num: u32,
+    mut off: usize,
+    ifindex: u32,
+    skip_outgoing: bool,
+    emit: &mut impl FnMut(RawPacket),
+) {
+    use std::mem::offset_of;
+    type H = libc::tpacket3_hdr;
+    type L = libc::sockaddr_ll;
+    let hdr_len = size_of::<H>();
+    let sll_off = (hdr_len + libc::TPACKET_ALIGNMENT - 1) & !(libc::TPACKET_ALIGNMENT - 1);
+    for _ in 0..num {
+        let Some(sll) = block.get(off + sll_off..off + sll_off + size_of::<L>()) else {
+            return;
+        };
+        let h = &block[off..off + hdr_len];
+        let (Some(next), Some(sec), Some(nsec), Some(snaplen), Some(len), Some(mac)) = (
+            rd_u32(h, offset_of!(H, tp_next_offset)),
+            rd_u32(h, offset_of!(H, tp_sec)),
+            rd_u32(h, offset_of!(H, tp_nsec)),
+            rd_u32(h, offset_of!(H, tp_snaplen)),
+            rd_u32(h, offset_of!(H, tp_len)),
+            rd_u16(h, offset_of!(H, tp_mac)),
+        ) else {
+            return;
+        };
+        let pkttype = sll[offset_of!(L, sll_pkttype)];
+        let sll_ifindex = rd_u32(sll, offset_of!(L, sll_ifindex))
+            .and_then(|v| u32::try_from(i32::from_ne_bytes(v.to_ne_bytes())).ok())
+            .unwrap_or(ifindex);
+        let start = off + usize::from(mac);
+        let Some(data) = block.get(start..start + snaplen as usize) else {
+            return;
+        };
+        if !(skip_outgoing && pkttype == libc::PACKET_OUTGOING) {
+            emit(RawPacket {
+                ts: SystemTime::UNIX_EPOCH + Duration::new(u64::from(sec), nsec.min(999_999_999)),
+                data: data.to_vec(),
+                orig_len: len,
+                ifindex: sll_ifindex,
+            });
         }
+        if next == 0 {
+            return;
+        }
+        off += next as usize;
     }
 }
 
@@ -459,5 +479,103 @@ impl Drop for Ring {
         unsafe {
             libc::munmap(self.base.as_ptr().cast(), self.block_size * self.block_nr);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::mem::offset_of;
+
+    use super::*;
+
+    type H = libc::tpacket3_hdr;
+    type L = libc::sockaddr_ll;
+
+    fn sll_off() -> usize {
+        (size_of::<H>() + libc::TPACKET_ALIGNMENT - 1) & !(libc::TPACKET_ALIGNMENT - 1)
+    }
+
+    /// `off` ofsetine bir paket kaydı yazar; veri `mac` ofsetinde.
+    #[allow(clippy::too_many_arguments)]
+    fn put(
+        b: &mut [u8],
+        off: usize,
+        next: u32,
+        sec: u32,
+        data: &[u8],
+        len: u32,
+        pkttype: u8,
+        ifx: i32,
+    ) {
+        let mac = sll_off() + size_of::<L>() + 2; // kernel gibi hizasız da olabilir
+        let w32 = |b: &mut [u8], o: usize, v: u32| {
+            b[off + o..off + o + 4].copy_from_slice(&v.to_ne_bytes());
+        };
+        w32(b, offset_of!(H, tp_next_offset), next);
+        w32(b, offset_of!(H, tp_sec), sec);
+        w32(b, offset_of!(H, tp_nsec), 5);
+        w32(
+            b,
+            offset_of!(H, tp_snaplen),
+            u32::try_from(data.len()).unwrap(),
+        );
+        w32(b, offset_of!(H, tp_len), len);
+        let m = u16::try_from(mac).unwrap().to_ne_bytes();
+        b[off + offset_of!(H, tp_mac)..][..2].copy_from_slice(&m);
+        let so = off + sll_off();
+        b[so + offset_of!(L, sll_pkttype)] = pkttype;
+        b[so + offset_of!(L, sll_ifindex)..][..4].copy_from_slice(&ifx.to_ne_bytes());
+        b[off + mac..off + mac + data.len()].copy_from_slice(data);
+    }
+
+    fn walk(b: &[u8], num: u32, first: usize, skip: bool) -> Vec<RawPacket> {
+        let mut out = Vec::new();
+        parse_block(b, num, first, 9, skip, &mut |p| out.push(p));
+        out
+    }
+
+    #[test]
+    fn block_walk_reads_packets() {
+        let mut b = vec![0u8; 4096];
+        put(&mut b, 48, 200, 7, b"merhaba", 1500, libc::PACKET_HOST, 3);
+        put(&mut b, 248, 0, 8, b"dunya", 5, libc::PACKET_OUTGOING, -1);
+        let got = walk(&b, 2, 48, false);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].data, b"merhaba");
+        assert_eq!((got[0].orig_len, got[0].ifindex), (1500, 3));
+        assert_eq!(got[0].ts, SystemTime::UNIX_EPOCH + Duration::new(7, 5));
+        // Negatif sll_ifindex → soketin arayüzü.
+        assert_eq!((got[1].data.as_slice(), got[1].ifindex), (&b"dunya"[..], 9));
+        // Giden paketler atlanabilir.
+        assert_eq!(walk(&b, 2, 48, true).len(), 1);
+        // tp_next_offset == 0: num büyük olsa da durur.
+        assert_eq!(walk(&b, 10, 248, false).len(), 1);
+    }
+
+    #[test]
+    fn block_walk_rejects_out_of_bounds() {
+        let mut b = vec![0u8; 512];
+        put(&mut b, 0, 480, 1, &[0xaa; 60], 60, libc::PACKET_HOST, 1);
+        // İkinci kayıt başlığı block dışına taşıyor.
+        assert_eq!(walk(&b, 2, 0, false).len(), 1);
+        // Veri block sonunu aşıyor (snaplen büyük).
+        b[offset_of!(H, tp_snaplen)..][..4].copy_from_slice(&10_000u32.to_ne_bytes());
+        assert_eq!(walk(&b, 1, 0, false).len(), 0);
+        // Boş/çok küçük block, büyük ofset: panik yok.
+        assert_eq!(walk(&[], 5, 0, false).len(), 0);
+        assert_eq!(walk(&b, 1, usize::MAX / 2, false).len(), 0);
+    }
+
+    #[test]
+    fn sock_filter_matches_kernel_layout() {
+        assert_eq!(size_of::<sock_filter>(), 8);
+        assert_eq!(offset_of!(sock_filter, k), 4);
+        let f = sock_filter {
+            code: 0x06,
+            jt: 0,
+            jf: 0,
+            k: 0xffff,
+        };
+        assert_eq!((f.code, f.k), (6, 0xffff));
     }
 }

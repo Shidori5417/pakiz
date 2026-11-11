@@ -15,7 +15,7 @@ use crate::analyzer::{catalog, Analyzer};
 use crate::keymap::{Action, Keymap};
 use crate::source::{PacketSource, VecSource};
 use crate::store::PacketStore;
-use crate::theme::Theme;
+use crate::theme::{ColorRule, Theme};
 use crate::tree::{flatten, NodePath, TreeRow};
 use crate::views::{ConvView, FollowView, StatsTab, StatsView, View};
 
@@ -96,6 +96,8 @@ pub struct App {
     pending_dropped: u64,
     pub keymap: Keymap,
     pub theme: Theme,
+    /// Liste satırı renklendirme kuralları (sırayla, ilk eşleşen).
+    pub coloring: Vec<ColorRule>,
     pub focus: Panel,
     pub paused: bool,
     pub autoscroll: bool,
@@ -144,14 +146,17 @@ pub struct App {
 impl App {
     #[must_use]
     pub fn new(source: Box<dyn PacketSource>, max_packets: usize) -> Self {
+        let catalog = catalog();
+        let theme = Theme::default();
         Self {
+            coloring: ColorRule::defaults(&theme, &catalog).unwrap_or_default(),
             source,
             analyzer: Analyzer::default(),
             store: PacketStore::new(max_packets),
             pending: VecDeque::new(),
             pending_dropped: 0,
             keymap: Keymap::default(),
-            theme: Theme::default(),
+            theme,
             focus: Panel::List,
             paused: false,
             autoscroll: true,
@@ -159,7 +164,7 @@ impl App {
             input: None,
             completion: None,
             filter_text: String::new(),
-            catalog: catalog(),
+            catalog,
             filter: None,
             shown: VecDeque::new(),
             scan_next: 1,
@@ -186,6 +191,18 @@ impl App {
             live: false,
             flushed: false,
         }
+    }
+
+    /// Temayı değiştirir; renklendirme = `rules` (config) + temanın varsayılan kuralları.
+    ///
+    /// # Errors
+    /// Varsayılan kural derlenemezse.
+    pub fn set_theme(&mut self, theme: Theme, rules: Vec<ColorRule>) -> Result<(), FilterError> {
+        let mut coloring = rules;
+        coloring.extend(ColorRule::defaults(&theme, &self.catalog)?);
+        self.coloring = coloring;
+        self.theme = theme;
+        Ok(())
     }
 
     /// Canlı yakalama kipi: süreç sütunu (`sock_diag` / `/proc`) ve istatistik

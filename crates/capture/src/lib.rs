@@ -1,5 +1,7 @@
 //! pakiz-capture: libpcap'siz `AF_PACKET` yakalama (`TPACKET_V3` mmap, yoksa `recvfrom`).
 
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 mod error;
 mod iface;
 mod socket;
@@ -201,4 +203,25 @@ pub fn start_capture(cfg: &CaptureConfig) -> Result<(Receiver<RawPacket>, Captur
             app_dropped,
         },
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_defaults() {
+        let c = CaptureConfig::new("lo");
+        assert_eq!(c.interface, "lo");
+        assert!(c.filter.is_none() && !c.force_recv);
+    }
+
+    #[test]
+    fn missing_interface_error() {
+        let Err(e) = start_capture(&CaptureConfig::new("pakizyok0")) else {
+            panic!("olmayan arayüz açıldı");
+        };
+        assert!(matches!(e, CaptureError::NoSuchInterface(_)));
+        assert_eq!(e.to_string(), "arayüz bulunamadı: pakizyok0");
+    }
 }

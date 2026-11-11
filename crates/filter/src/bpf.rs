@@ -1,7 +1,8 @@
 //! Yakalama filtresi (`-f`): tcpdump benzeri küçük bir alt kümeyi klasik BPF'e derler.
 //!
 //! Gramer: `tcp`, `udp`, `icmp`, `arp`, `ip`, `ip6`, `[src|dst] host A.B.C.D`,
-//! `[src|dst] port N`; `and`/`&&`, `or`/`||`, `not`/`!` ve parantez.
+//! `[src|dst] port N`; `and`/`&&`, `or`/`||`, `not`/`!` ve parantez. Yan yana iki
+//! ilkel tcpdump gibi örtük `and` sayılır (`udp port 53`, `src host 1.2.3.4 tcp`).
 //! VLAN'sız Ethernet varsayılır; `host`/`port` yalnızca IPv4 (port: TCP/UDP,
 //! parçalanmamış). `tcp`/`udp` IPv4 ve (uzantı başlıksız) IPv6'yı kapsar.
 
@@ -194,8 +195,13 @@ impl P<'_> {
 
     fn and(&mut self) -> Result<Bx, FilterError> {
         let mut l = self.unary()?;
-        while matches!(self.peek(), Some("and" | "&&")) {
-            self.pos += 1;
+        // tcpdump gibi yan yana iki ilkel örtük `and`: `udp port 53`.
+        while let Some(t) = self.peek() {
+            match t {
+                "and" | "&&" => self.pos += 1,
+                "or" | "||" | ")" => break,
+                _ => {}
+            }
             l = and(l, self.unary()?);
         }
         Ok(l)
@@ -466,7 +472,28 @@ mod tests {
         assert!(compile("host 1.2.3").is_err());
         assert!(compile("src foo 1").is_err());
         assert!(compile("(tcp").is_err());
-        assert!(compile("tcp udp").is_err());
         assert!(compile("tcp and").is_err());
+        assert!(compile("tcp port").is_err());
+        assert!(compile("udp port 53 )").is_err());
+    }
+
+    #[test]
+    fn implicit_and() {
+        for (imp, exp) in [
+            ("udp port 53", "udp and port 53"),
+            ("tcp port 80", "tcp and port 80"),
+            ("src host 1.2.3.4 tcp", "src host 1.2.3.4 and tcp"),
+            (
+                "tcp port 80 or udp port 53",
+                "(tcp and port 80) or (udp and port 53)",
+            ),
+            ("not tcp port 22", "(not tcp) and port 22"),
+            (
+                "(udp port 53) host 8.8.8.8",
+                "udp and port 53 and host 8.8.8.8",
+            ),
+        ] {
+            assert_eq!(compile(imp).unwrap(), compile(exp).unwrap(), "{imp}");
+        }
     }
 }

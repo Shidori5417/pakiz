@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
-exclude = ["crates/dissect/fuzz"]
+exclude = ["crates/dissect/fuzz", "crates/filter/fuzz"]
 
 [workspace.package]
 version = "0.1.0"
@@ -22,6 +22,8 @@ libc = "0.2"
 thiserror = "2"
 crossbeam-channel = "0.5"
 anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
 

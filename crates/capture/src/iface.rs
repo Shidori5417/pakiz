@@ -92,3 +92,32 @@ pub fn interface_index(name: &str) -> Result<u32> {
         i => Ok(i),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `getifaddrs` yetki istemez; netns'te bile en az `lo` vardır.
+    #[test]
+    fn lists_interfaces_sorted_with_loopback() {
+        let l = list_interfaces().unwrap();
+        assert!(l.windows(2).all(|w| w[0].index <= w[1].index));
+        let lo = l.iter().find(|i| i.loopback).expect("loopback yok");
+        assert_eq!(interface_index(&lo.name).unwrap(), lo.index);
+        for i in &l {
+            if let Some(m) = &i.mac {
+                assert!(m.split(':').all(|b| b.len() == 2), "{m}");
+            }
+        }
+    }
+
+    #[test]
+    fn bad_interface_names() {
+        for n in ["", "a/b", "nul\0x", "pakizyok0"] {
+            assert!(
+                matches!(interface_index(n), Err(CaptureError::NoSuchInterface(_))),
+                "{n}"
+            );
+        }
+    }
+}

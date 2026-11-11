@@ -844,3 +844,110 @@ fn file_mode_analyzes_during_indexing() {
     );
     std::fs::remove_file(p).unwrap();
 }
+
+#[test]
+fn key_parser() {
+    let n = KeyModifiers::NONE;
+    assert_eq!(parse_key("j").unwrap(), (KeyCode::Char('j'), n));
+    assert_eq!(
+        parse_key("Ctrl-c").unwrap(),
+        (KeyCode::Char('c'), KeyModifiers::CONTROL)
+    );
+    assert_eq!(
+        parse_key("ctrl-alt-x").unwrap(),
+        (
+            KeyCode::Char('x'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT
+        )
+    );
+    assert_eq!(parse_key("Shift-g").unwrap(), (KeyCode::Char('G'), n));
+    assert_eq!(parse_key("Shift-Tab").unwrap(), (KeyCode::BackTab, n));
+    assert_eq!(parse_key("pagedown").unwrap(), (KeyCode::PageDown, n));
+    assert_eq!(parse_key("F12").unwrap(), (KeyCode::F(12), n));
+    assert_eq!(parse_key("Space").unwrap(), (KeyCode::Char(' '), n));
+    assert_eq!(parse_key("-").unwrap(), (KeyCode::Char('-'), n));
+    for bad in ["", "Ctrl-", "F0", "F25", "Hyper-x", "Entr"] {
+        assert!(parse_key(bad).is_err(), "{bad}");
+    }
+    // Biçimleyici geri okunabilir.
+    for (_, a) in Action::ALL {
+        for k in Keymap::default().keys_for(a) {
+            assert_eq!(parse_key(&format_key(k)).unwrap(), k, "{a:?}");
+        }
+    }
+}
+
+#[test]
+fn keymap_set_rebinds_and_steals() {
+    let mut km = Keymap::default();
+    let stolen = km.set(
+        Action::Down,
+        &[parse_key("x").unwrap(), parse_key("k").unwrap()],
+    );
+    assert_eq!(
+        stolen,
+        [((KeyCode::Char('k'), KeyModifiers::NONE), Action::Up)]
+    );
+    let ev = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+    assert_eq!(km.action(&ev('x')), Some(Action::Down));
+    assert_eq!(km.action(&ev('j')), None);
+    assert_eq!(
+        km.action(&KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+        Some(Action::Up)
+    );
+    // Shift'li karakter olayları da eşleşir.
+    assert_eq!(
+        km.action(&KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT)),
+        Some(Action::Bottom)
+    );
+    assert_eq!(
+        Action::from_name("half_page_down"),
+        Some(Action::HalfPageDown)
+    );
+    assert_eq!(Action::SelectTab(2).name(), "tab3");
+    assert_eq!(Action::from_name("nope"), None);
+}
+
+#[test]
+fn themes_and_colors() {
+    assert!(Theme::by_name("LIGHT").is_some() && Theme::by_name("x").is_none());
+    for c in ["#c8a2ff", "red", "darkgray", "reset", "42"] {
+        let col = parse_color(c).unwrap();
+        assert_eq!(parse_color(&format_color(col)).unwrap(), col, "{c}");
+    }
+    assert!(parse_color("#12345").is_err() && parse_color("mor").is_err());
+    let cat = catalog();
+    for name in Theme::NAMES {
+        let t = Theme::by_name(name).unwrap();
+        assert_eq!(ColorRule::defaults(&t, &cat).unwrap().len(), 9);
+    }
+}
+
+#[test]
+fn coloring_rules_first_match_and_theme() {
+    let mut app = app_with(3, 10);
+    let rule = ColorRule::new(
+        "udp.dstport == 53",
+        &app.catalog,
+        Some(ratatui::style::Color::Rgb(1, 2, 3)),
+        Some(ratatui::style::Color::Rgb(4, 5, 6)),
+    )
+    .unwrap();
+    app.set_theme(Theme::light(), vec![rule]).unwrap();
+    let buf = cells(&mut app, 120, 30);
+    let c = cell_of(&buf, "10.0.0.1").unwrap();
+    assert_eq!(
+        (c.fg, c.bg),
+        (
+            ratatui::style::Color::Rgb(1, 2, 3),
+            ratatui::style::Color::Rgb(4, 5, 6)
+        )
+    );
+    // Kural yoksa varsayılan `udp` kuralı (light teması).
+    app.set_theme(Theme::light(), Vec::new()).unwrap();
+    let buf = cells(&mut app, 120, 30);
+    let c = cell_of(&buf, "10.0.0.1").unwrap();
+    assert_eq!(c.fg, Theme::light().udp);
+    // Zemin tema rengiyle boyanır.
+    assert_eq!(buf[(119, 29)].bg, Theme::light().status_bg);
+}

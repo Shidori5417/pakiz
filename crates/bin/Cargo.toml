@@ -16,10 +16,13 @@ clap.workspace = true
 tokio.workspace = true
 crossbeam-channel.workspace = true
 pakiz-tui.workspace = true
+ratatui.workspace = true
 pakiz-storage.workspace = true
 pakiz-filter.workspace = true
 pakiz-flow.workspace = true
 pakiz-stats.workspace = true
+serde.workspace = true
+toml.workspace = true
 
 [lints]
 workspace = true

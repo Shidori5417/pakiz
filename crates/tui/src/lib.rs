@@ -35,10 +35,10 @@ pub use app::{
     App, Completion, FilterState, InputKind, InputLine, Panel, ANALYZE_BATCH, DRAIN_BATCH,
     FILTER_BATCH, INDEX_BATCH,
 };
-pub use keymap::{Action, Keymap};
+pub use keymap::{format_key, parse_key, Action, Key, Keymap};
 pub use source::{PacketSource, VecSource};
 pub use store::{Entry, PacketStore};
-pub use theme::Theme;
+pub use theme::{format_color, parse_color, ColorRule, Theme};
 pub use tree::{flatten, highlight_range, TreeRow};
 pub use ui::{draw, hex_line};
 pub use views::{fmt_bytes, ConvSort, ConvView, FollowMode, FollowView, StatsTab, StatsView, View};
@@ -49,6 +49,8 @@ pub const FRAME: Duration = Duration::from_millis(33);
 /// Terminali hazırlar; drop edilince (ve panic'te) geri yükler.
 pub struct Tui {
     pub terminal: Terminal<CrosstermBackend<Stdout>>,
+    /// Çizimler arası en kısa süre ([`Tui::set_fps`]).
+    frame: Duration,
 }
 
 fn restore_terminal() {
@@ -74,12 +76,20 @@ impl Tui {
             return Err(e);
         }
         match Terminal::new(CrosstermBackend::new(io::stdout())) {
-            Ok(terminal) => Ok(Self { terminal }),
+            Ok(terminal) => Ok(Self {
+                terminal,
+                frame: FRAME,
+            }),
             Err(e) => {
                 restore_terminal();
                 Err(e)
             }
         }
+    }
+
+    /// Saniyedeki en fazla çizim (1..=240'a kırpılır).
+    pub fn set_fps(&mut self, fps: u32) {
+        self.frame = Duration::from_secs(1) / fps.clamp(1, 240);
     }
 
     /// Arayüz seçim listesi. `Enter` seçer, `q`/`Esc` iptal (`None`).
@@ -117,14 +127,15 @@ impl Tui {
         }
     }
 
-    /// Olay döngüsü: kanalı boşalt, olayları işle, en fazla ~30 fps çiz.
+    /// Olay döngüsü: kanalı boşalt, olayları işle, en fazla `fps` (varsayılan 30) çiz.
     ///
     /// # Errors
     /// Terminal G/Ç hatasında.
     pub fn run(&mut self, app: &mut App) -> io::Result<()> {
+        let frame = self.frame;
         let mut dirty = true;
         let mut last_draw = Instant::now()
-            .checked_sub(FRAME)
+            .checked_sub(frame)
             .unwrap_or_else(Instant::now);
         let mut last_status = Instant::now();
         // SIGTERM/SIGHUP: döngüden temiz çık ki `Drop` terminali geri yüklesin.
@@ -142,15 +153,15 @@ impl Tui {
                 dirty = true;
                 last_status = Instant::now();
             }
-            if dirty && last_draw.elapsed() >= FRAME {
+            if dirty && last_draw.elapsed() >= frame {
                 self.terminal.draw(|f| ui::draw(f, app))?;
                 last_draw = Instant::now();
                 dirty = false;
             }
             let timeout = if dirty {
-                FRAME.saturating_sub(last_draw.elapsed())
+                frame.saturating_sub(last_draw.elapsed())
             } else {
-                FRAME
+                frame
             };
             if event::poll(timeout)? {
                 // Birikmiş tüm olayları işle.

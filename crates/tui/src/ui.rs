@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Tabs}
 use ratatui::Frame;
 
 use crate::app::{App, FilterState, InputKind, InputLine, Panel};
-use crate::theme::Theme;
+use crate::theme::{ColorRule, Theme};
 use crate::tree::highlight_range;
 use crate::views::{draw_conversations, draw_follow, draw_stats, View};
 
@@ -76,6 +76,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Constraint::Length(1),
     ])
     .areas(f.area());
+    f.render_widget(
+        Block::default().style(Style::default().fg(app.theme.fg).bg(app.theme.bg)),
+        f.area(),
+    );
     draw_tabs(f, app, tabs);
     match app.view {
         View::Packets => {
@@ -221,9 +225,16 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
         let e = app.store.get(app.store_index(i)?)?;
         let s = &e.summary;
         let flags = e.flow.map(|t| t.flags).unwrap_or_default();
-        let mut style = theme
-            .analysis_style(flags)
-            .unwrap_or_else(|| Style::default().fg(theme.protocol_color(s.protocol, e.malformed)));
+        let mut style = if e.malformed {
+            Style::default().fg(theme.malformed)
+        } else {
+            // Renklendirme kuralları: görünür satırlar yeniden ayrıştırılır, ilk eşleşen.
+            let d = an.dissect(&e.raw, e.number, e.flow.as_ref());
+            app.coloring
+                .iter()
+                .find(|r| r.matches(&d, &e.raw))
+                .map_or_else(|| Style::default().fg(theme.other), ColorRule::style)
+        };
         if Some(i) == app.selected {
             style = style.bg(theme.selected_bg).add_modifier(Modifier::BOLD);
         }

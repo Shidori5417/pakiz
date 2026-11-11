@@ -1,0 +1,89 @@
+# pakiz yapılandırması: $XDG_CONFIG_HOME/pakiz/config.toml (yoksa ~/.config/pakiz/config.toml)
+# `pakiz --dump-config > ~/.config/pakiz/config.toml` ile oluşturulabilir.
+# Komut satırı bayrakları (-i, --max-packets, -n, --theme) buradaki değerleri ezer.
+
+[general]
+# -i verilmezse yakalanacak arayüz (yoksa TUI arayüz seçtirir).
+# default_interface = "eth0"
+# Bellekte tutulacak en fazla paket (canlı yakalama; eskiler düşer).
+max_packets = 100000
+# Saniyedeki en fazla çizim (1..=240).
+fps = 30
+# IP yerine DNS cevaplarından öğrenilen adları göster (TUI'de `n`).
+resolve_names = false
+# Canlı yakalamada yeni paketlere otomatik kaydır (TUI'de `a`).
+autoscroll = true
+
+[theme]
+# Yerleşik temalar: dark, light. Aşağıdaki renkler temanın üstüne yazılır.
+# Renk: "#rrggbb", ad (red, green, darkgray, reset...) veya 256 renk indeksi.
+name = "dark"
+# bg = "reset"
+# fg = "reset"
+# selection = "darkgray"
+# highlight = "blue"
+# status = "#303040"
+# border = "gray"
+# border_focus = "cyan"
+
+# Protokol satır renkleri (varsayılan renklendirme kuralları bunları kullanır).
+[theme.protocols]
+# tcp = "#d7afff"
+# udp = "#87d7ff"
+# arp = "yellow"
+# icmp = "#ffafd7"
+# dns = "#87ffaf"
+# http = "green"
+# malformed = "red"
+# other = "reset"
+
+# Eylem → tuş listesi. Bir eylem yazılırsa varsayılan tuşlarının yerini alır;
+# tuş başka bir eylemin varsayılanıysa ondan alınır. Önekler: Ctrl- Alt- Shift-;
+# adlı tuşlar: Enter Esc Tab BackTab Backspace Delete Insert Up Down Left Right
+# Home End PageUp PageDown Space F1..F24.
+[keys]
+down = ["Down", "j"]
+up = ["Up", "k"]
+top = ["Home", "g"]
+bottom = ["End", "G"]
+half_page_down = ["PageDown", "Ctrl-d"]
+half_page_up = ["PageUp", "Ctrl-u"]
+next_panel = ["Tab"]
+toggle = ["Enter", "Space"]
+collapse = ["Left", "h"]
+expand = ["Right", "l"]
+quit = ["q", "Ctrl-c"]
+pause = ["p"]
+autoscroll = ["a"]
+help = ["?"]
+filter = ["/"]
+command = [":"]
+follow = ["F"]
+conversations = ["c"]
+statistics = ["S"]
+back = ["Esc"]
+toggle_resolve = ["n"]
+cycle_mode = ["m"]
+sort = ["s"]
+tab1 = ["1"]
+tab2 = ["2"]
+tab3 = ["3"]
+tab4 = ["4"]
+
+# Renklendirme kuralları (Wireshark coloring rules gibi): display filter ile,
+# sırayla denenir, ilk eşleşen satırın rengini belirler. Buradakiler temanın
+# varsayılan kurallarından önce gelir; varsayılanlar (sırayla):
+#   tcp.analysis.retransmission or tcp.analysis.fast_retransmission or tcp.analysis.spurious_retransmission or tcp.analysis.out_of_order or tcp.analysis.duplicate_ack or tcp.analysis.keep_alive or tcp.analysis.lost_segment or tcp.analysis.ack_lost_segment  (fg #ff5f5f, bg black)
+#   tcp.analysis.zero_window or tcp.analysis.zero_window_probe or tcp.analysis.window_full  (fg black, bg #ffd75f)
+#   tcp.flags.reset == 1  (fg #fffc9c, bg #a40000)
+#   arp  (fg yellow, bg -)
+#   icmp or icmpv6  (fg #ffafd7, bg -)
+#   dns or mdns  (fg #87ffaf, bg -)
+#   http or tls  (fg green, bg -)
+#   tcp  (fg #d7afff, bg -)
+#   udp  (fg #87d7ff, bg -)
+#
+# [[coloring]]
+# filter = "tcp.port == 22"
+# fg = "#000000"
+# bg = "#a0d0ff"
