@@ -109,7 +109,7 @@ pakiz -r yakalama.pcap                  # dosyayı TUI'de aç
 pakiz -r yakalama.pcap --no-tui -Y dns  # satır çıktısı, yalnız DNS
 pakiz -r a.pcap -Y http -w b.pcapng     # süz ve pcapng'ye dönüştür
 pakiz -r a.pcap --stats                 # protokol dağılımı + top talkers
-pakiz -i eth0 --count                   # saniyede bir paket/bayt/düşen sayacı
+pakiz -i eth0 --count                   # her saniye toplam paket/bayt/düşen sayacı
 pakiz --list-interfaces
 pakiz --theme ocean                     # yerleşik tema (dark, light, ocean, forest)
 pakiz --dump-config > ~/.config/pakiz/config.toml
@@ -120,7 +120,7 @@ pakiz --dump-config > ~/.config/pakiz/config.toml
 
 | Bayrak | Açıklama |
 |---|---|
-| `-i, --interface <ARAYÜZ>` | Yakalanacak arayüz (yoksa `general.default_interface`, o da yoksa seçim ekranı) |
+| `-i, --interface <ARAYÜZ>` | Yakalanacak arayüz (yoksa `general.default_interface`; TUI'de o da yoksa seçim ekranı açılır, `--no-tui` ve `--count`'ta hata verir) |
 | `-r, --read <DOSYA>` | pcap/pcapng dosyasından oku |
 | `-w, --write <DOSYA>` | Dosyaya yaz (`.pcapng` uzantısı → pcapng, diğerleri pcap) |
 | `-f, --capture-filter <FİLTRE>` | Kernel BPF yakalama filtresi |
