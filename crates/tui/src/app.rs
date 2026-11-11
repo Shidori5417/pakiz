@@ -1,19 +1,23 @@
 //! Uygulama durumu ve eylemler (render'dan bağımsız).
 
 use std::collections::{HashSet, VecDeque};
+use std::time::SystemTime;
 
-use pakiz_dissect::{Dissection, RawPacket, Registry};
+use pakiz_dissect::{Dissection, RawPacket};
 use pakiz_filter::{complete, FieldCatalog, Filter, FilterError};
+use pakiz_flow::Proto;
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::{Position, Rect};
 
+use crate::analyzer::{catalog, Analyzer};
 use crate::keymap::{Action, Keymap};
 use crate::source::{PacketSource, VecSource};
 use crate::store::PacketStore;
 use crate::theme::Theme;
 use crate::tree::{flatten, NodePath, TreeRow};
+use crate::views::{ConvView, FollowView, StatsTab, StatsView, View};
 
 /// Tek seferde kaynaktan çekilecek en fazla paket.
 pub const DRAIN_BATCH: usize = 50_000;
@@ -23,6 +27,9 @@ pub const INDEX_BATCH: usize = 20_000;
 
 /// Filtre değiştikten sonra her tick'te yeniden değerlendirilecek en fazla paket.
 pub const FILTER_BATCH: usize = 5_000;
+
+/// Dosya modunda her tick'te analiz edilecek (dissect + akış + istatistik) en fazla paket.
+pub const ANALYZE_BATCH: usize = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Panel {
@@ -81,7 +88,8 @@ struct TreeCache {
 #[allow(clippy::struct_excessive_bools)]
 pub struct App {
     source: Box<dyn PacketSource>,
-    registry: Registry,
+    /// Kümülatif akış/istatistik/DNS durumu.
+    pub analyzer: Analyzer,
     pub store: PacketStore,
     /// Duraklatılmışken gelen paketler (en fazla store kapasitesi kadar).
     pending: VecDeque<RawPacket>,
@@ -120,6 +128,17 @@ pub struct App {
     max_pending: usize,
     /// Durum çubuğunda gösterilen son komut sonucu.
     pub message: Option<String>,
+    /// Etkin görünüm (sekme).
+    pub view: View,
+    pub follow: Option<FollowView>,
+    pub conv: ConvView,
+    pub stats_view: StatsView,
+    /// Kaynak/Hedef yerine DNS adları (`n`).
+    pub resolve_names: bool,
+    /// Canlı yakalama: süreç eşleme ve duvar saatiyle akan grafik.
+    live: bool,
+    /// Dosya modunda yakalama sonu birleştirici boşaltması yapıldı mı.
+    flushed: bool,
 }
 
 impl App {
@@ -127,7 +146,7 @@ impl App {
     pub fn new(source: Box<dyn PacketSource>, max_packets: usize) -> Self {
         Self {
             source,
-            registry: Registry::default(),
+            analyzer: Analyzer::default(),
             store: PacketStore::new(max_packets),
             pending: VecDeque::new(),
             pending_dropped: 0,
@@ -140,7 +159,7 @@ impl App {
             input: None,
             completion: None,
             filter_text: String::new(),
-            catalog: FieldCatalog::default(),
+            catalog: catalog(),
             filter: None,
             shown: VecDeque::new(),
             scan_next: 1,
@@ -159,7 +178,27 @@ impl App {
             last_hl: None,
             max_pending: max_packets.max(1),
             message: None,
+            view: View::Packets,
+            follow: None,
+            conv: ConvView::default(),
+            stats_view: StatsView::default(),
+            resolve_names: false,
+            live: false,
+            flushed: false,
         }
+    }
+
+    /// Canlı yakalama kipi: süreç sütunu (`sock_diag` / `/proc`) ve istatistik
+    /// grafiğinin duvar saatiyle akması.
+    pub fn enable_live(&mut self) {
+        self.live = true;
+        self.analyzer.enable_processes();
+    }
+
+    /// Canlı kip mi.
+    #[must_use]
+    pub fn is_live(&self) -> bool {
+        self.live
     }
 
     /// Dosya kaynağı: paketler belleğe alınmaz, indeks artımlı olarak [`App::ingest`]
@@ -238,7 +277,8 @@ impl App {
     fn scan(&mut self, budget: usize) -> bool {
         let first = self.store.first_number();
         self.scan_next = self.scan_next.max(first);
-        let end = first + self.store.len() as u64;
+        // Filtre akış analizine bağlı olabilir: analiz edilmemiş paketler beklenir.
+        let end = first + self.store.analyzed() as u64;
         let budget = if self.filter.is_none() {
             usize::MAX
         } else {
@@ -248,8 +288,11 @@ impl App {
         while self.scan_next < end && n < budget {
             let num = self.scan_next;
             let keep = self.filter.as_ref().is_none_or(|f| {
-                self.store.raw(index_of(num, first)).is_some_and(|raw| {
-                    let d = self.registry.dissect_numbered(&raw, Some(num));
+                let idx = index_of(num, first);
+                self.store.raw(idx).is_some_and(|raw| {
+                    let d = self
+                        .analyzer
+                        .dissect(&raw, num, self.store.flow(idx).as_ref());
                     f.matches(&d, &raw)
                 })
             });
@@ -269,6 +312,7 @@ impl App {
     /// Dosya oluşturma/yazma hatası.
     pub fn export(&mut self, path: &str) -> pakiz_storage::Result<usize> {
         while self.store.index_more(INDEX_BATCH) > 0 {}
+        self.analyze_more(usize::MAX);
         self.scan(usize::MAX);
         let mut w = pakiz_storage::create(path, pakiz_storage::Format::from_path(path))?;
         let mut n = 0;
@@ -286,6 +330,12 @@ impl App {
         let cmd = cmd.trim();
         if cmd == "q" {
             self.quit = true;
+        } else if cmd == "follow" {
+            self.open_follow();
+        } else if cmd == "conv" {
+            self.open_view(View::Conversations);
+        } else if cmd == "stats" {
+            self.open_view(View::Stats);
         } else if let Some(path) = cmd.strip_prefix("w ").map(str::trim) {
             self.message = Some(match self.export(path) {
                 Ok(n) => format!("{n} paket yazıldı: {path}"),
@@ -317,6 +367,11 @@ impl App {
         let mut changed = false;
         if self.store.is_file() {
             changed |= self.store.index_more(INDEX_BATCH) > 0;
+            changed |= self.analyze_more(ANALYZE_BATCH);
+        }
+        if self.live {
+            self.analyzer.refresh_processes();
+            self.analyzer.stats.advance_to(SystemTime::now());
         }
         if !self.paused {
             let n = self.pending.len().min(DRAIN_BATCH);
@@ -351,21 +406,53 @@ impl App {
         changed
     }
 
-    /// Paketi ayrıştırır, (süzme yetişmişse) filtreyi aynı ayrıştırma üzerinde
-    /// uygular ve özetle birlikte saklar.
+    /// Dosya modu: indekslenmiş ama analiz edilmemiş paketlerden en fazla
+    /// `budget` tanesini hattan geçirir (filtre yetişmişse aynı ayrıştırmayla
+    /// süzer). Analiz bitince birleştiriciler boşaltılır. İlerleme varsa `true`.
+    fn analyze_more(&mut self, budget: usize) -> bool {
+        let mut n = 0;
+        while self.store.analyzed() < self.store.len() && n < budget {
+            let idx = self.store.analyzed();
+            let number = idx as u64 + 1;
+            let raw = self.store.raw(idx).map(std::borrow::Cow::into_owned);
+            let flow = raw.and_then(|raw| {
+                let a = self.analyzer.analyze(number, &raw);
+                self.admit(number, &a.dissection, &raw);
+                a.flow
+            });
+            self.store.push_flow(flow);
+            n += 1;
+        }
+        let done =
+            self.store.index_progress().is_none() && self.store.analyzed() == self.store.len();
+        if done && !self.flushed && self.store.is_file() {
+            self.analyzer.flows.flush_all();
+            self.flushed = true;
+        }
+        n > 0
+    }
+
+    /// Süzme bu pakete yetişmişse filtreyi verilen ayrıştırmayla uygular.
+    fn admit(&mut self, number: u64, d: &Dissection, raw: &RawPacket) {
+        if self.scan_next != number {
+            return;
+        }
+        if self.filter.as_ref().is_none_or(|f| f.matches(d, raw)) {
+            self.shown.push_back(number);
+        }
+        self.scan_next += 1;
+    }
+
+    /// Paketi hattan geçirir (dissect → akış → istatistik → DNS → süreç),
+    /// (süzme yetişmişse) filtreyi aynı ayrıştırma üzerinde uygular ve özetle
+    /// birlikte saklar.
     pub(crate) fn add(&mut self, p: RawPacket) {
         let number = self.store.next_number();
-        let d = self.registry.dissect_numbered(&p, Some(number));
-        let in_order = self.scan_next == number;
-        let keep = in_order && self.filter.as_ref().is_none_or(|f| f.matches(&d, &p));
+        let a = self.analyzer.analyze(number, &p);
+        self.admit(number, &a.dissection, &p);
+        let d = a.dissection;
         let malformed = d.layers.iter().any(pakiz_dissect::Layer::is_malformed);
-        let evicted = self.store.push(p, d.summary, malformed) > 0;
-        if in_order {
-            if keep {
-                self.shown.push_back(number);
-            }
-            self.scan_next += 1;
-        }
+        let evicted = self.store.push(p, d.summary, malformed, a.flow, a.process) > 0;
         if evicted {
             self.trim_evicted();
         }
@@ -399,7 +486,7 @@ impl App {
         let e = self.store.get(self.selected_index()?)?;
         let stale = self.cache.as_ref().is_none_or(|c| c.number != e.number);
         if stale {
-            let dissection = self.registry.dissect_numbered(&e.raw, Some(e.number));
+            let dissection = self.analyzer.dissect(&e.raw, e.number, e.flow.as_ref());
             let rows = flatten(&dissection, &self.expanded);
             self.tree_selected = self.tree_selected.min(rows.len().saturating_sub(1));
             self.cache = Some(TreeCache {
@@ -490,7 +577,162 @@ impl App {
         self.reflatten();
     }
 
+    /// Seçili paketin akışı için Follow Stream görünümünü açar.
+    pub fn open_follow(&mut self) {
+        let tag = self.selected_index().and_then(|i| self.store.flow(i));
+        match tag {
+            Some(t) => {
+                if self.follow.as_ref().is_none_or(|f| f.stream != t.stream) {
+                    self.follow = Some(FollowView::new(t.stream));
+                }
+                self.view = View::Follow;
+            }
+            None => {
+                self.message = Some("seçili paket bir TCP/UDP akışına ait değil".into());
+            }
+        }
+    }
+
+    /// Görünüm değiştirir (`Follow` seçili paketin akışını açar).
+    pub fn open_view(&mut self, v: View) {
+        match v {
+            View::Follow => self.open_follow(),
+            View::Conversations => {
+                self.conv.refreshed = None;
+                self.view = v;
+            }
+            View::Packets | View::Stats => self.view = v,
+        }
+    }
+
+    /// Konuşmalar: seçili akışı `tcp.stream == N` / `udp.stream == N` ile süzer.
+    fn filter_selected_conversation(&mut self) {
+        let Some(c) = self.conv.rows.get(self.conv.selected) else {
+            return;
+        };
+        let p = if c.stream.proto == Proto::Tcp {
+            "tcp"
+        } else {
+            "udp"
+        };
+        let text = format!("{p}.stream == {}", c.stream.index);
+        if self.set_filter(&text).is_ok() {
+            if self.history.last() != Some(&text) {
+                self.history.push(text);
+            }
+            self.view = View::Packets;
+        }
+    }
+
+    /// Eylemi etkin görünüme göre uygular.
     pub fn apply(&mut self, action: Action) {
+        match action {
+            Action::Help => self.show_help = !self.show_help,
+            Action::Command => self.open_input(InputKind::Command),
+            Action::Pause => self.paused = !self.paused,
+            Action::ToggleResolve => {
+                self.resolve_names = !self.resolve_names;
+                self.message = Some(
+                    if self.resolve_names {
+                        "ad çözümleme açık"
+                    } else {
+                        "ad çözümleme kapalı"
+                    }
+                    .into(),
+                );
+            }
+            Action::Follow => self.open_view(View::Follow),
+            Action::Conversations => self.open_view(View::Conversations),
+            Action::Statistics => self.open_view(View::Stats),
+            Action::Back => self.view = View::Packets,
+            Action::Quit if self.view != View::Packets => self.view = View::Packets,
+            _ => match self.view {
+                View::Packets => self.apply_packets(action),
+                View::Follow => self.apply_follow(action),
+                View::Conversations => self.apply_conv(action),
+                View::Stats => self.apply_stats(action),
+            },
+        }
+    }
+
+    /// Kaydırma eylemi → satır farkı (`page` yarım sayfa).
+    fn scroll_delta(action: Action, page: usize) -> Option<isize> {
+        let page = isize::try_from(page.max(1)).unwrap_or(1);
+        Some(match action {
+            Action::Down => 1,
+            Action::Up => -1,
+            Action::HalfPageDown => page,
+            Action::HalfPageUp => -page,
+            Action::Top => isize::MIN,
+            Action::Bottom => isize::MAX,
+            _ => return None,
+        })
+    }
+
+    fn apply_follow(&mut self, action: Action) {
+        let Some(fv) = self.follow.as_mut() else {
+            return;
+        };
+        if action == Action::CycleMode {
+            fv.mode = fv.mode.next();
+            fv.offset = 0;
+        } else if let Some(d) = Self::scroll_delta(action, fv.height / 2) {
+            fv.scroll(d);
+        }
+    }
+
+    fn apply_conv(&mut self, action: Action) {
+        match action {
+            Action::Sort => {
+                self.conv.sort = self.conv.sort.next();
+                self.conv.sort_rows();
+            }
+            Action::Toggle => self.filter_selected_conversation(),
+            _ => {
+                if let Some(d) = Self::scroll_delta(action, self.conv.height / 2) {
+                    self.conv.move_by(d);
+                }
+            }
+        }
+    }
+
+    fn apply_stats(&mut self, action: Action) {
+        match action {
+            Action::NextPanel => {
+                self.stats_view.tab = self.stats_view.tab.next();
+                self.stats_view.offset = 0;
+            }
+            Action::SelectTab(i) => {
+                if let Some(&t) = StatsTab::ALL.get(usize::from(i)) {
+                    self.stats_view.tab = t;
+                    self.stats_view.offset = 0;
+                }
+            }
+            _ => {
+                if let Some(d) = Self::scroll_delta(action, self.stats_view.height / 2) {
+                    self.stats_view.scroll(d);
+                }
+            }
+        }
+    }
+
+    fn open_input(&mut self, kind: InputKind) {
+        let text = if kind == InputKind::Filter {
+            self.filter_text.clone()
+        } else {
+            String::new()
+        };
+        self.input = Some(InputLine {
+            kind,
+            text,
+            state: FilterState::Empty,
+        });
+        self.completion = None;
+        self.history_pos = None;
+        self.revalidate();
+    }
+
+    fn apply_packets(&mut self, action: Action) {
         let page = isize::try_from(self.page(self.focus)).unwrap_or(1);
         match action {
             Action::Down => self.move_by(self.focus, 1),
@@ -510,29 +752,14 @@ impl App {
             Action::Collapse => self.set_expanded(Some(false)),
             Action::Expand => self.set_expanded(Some(true)),
             Action::Quit => self.quit = true,
-            Action::Pause => self.paused = !self.paused,
             Action::AutoScroll => {
                 self.autoscroll = !self.autoscroll;
                 if self.autoscroll && !self.shown.is_empty() {
                     self.select(self.shown.len() - 1);
                 }
             }
-            Action::Help => self.show_help = !self.show_help,
-            Action::Filter | Action::Command => {
-                let (kind, text) = if action == Action::Filter {
-                    (InputKind::Filter, self.filter_text.clone())
-                } else {
-                    (InputKind::Command, String::new())
-                };
-                self.input = Some(InputLine {
-                    kind,
-                    text,
-                    state: FilterState::Empty,
-                });
-                self.completion = None;
-                self.history_pos = None;
-                self.revalidate();
-            }
+            Action::Filter => self.open_input(InputKind::Filter),
+            _ => {}
         }
     }
 
@@ -693,6 +920,14 @@ impl App {
     }
 
     pub fn on_mouse(&mut self, m: MouseEvent) {
+        if self.view != View::Packets {
+            match m.kind {
+                MouseEventKind::ScrollDown => (0..3).for_each(|_| self.apply(Action::Down)),
+                MouseEventKind::ScrollUp => (0..3).for_each(|_| self.apply(Action::Up)),
+                _ => {}
+            }
+            return;
+        }
         let Some(panel) = self.panel_at(m.column, m.row) else {
             return;
         };

@@ -25,6 +25,15 @@ capture thread ──RawPacket──▶ crossbeam channel ──▶ app (tokio)
                                                     └─ tui (30 fps tick) / --no-tui stdout
 ```
 
+Paket işleme hattı (`pakiz_tui::Analyzer`, TUI ve `--no-tui` ortak): her paket bir kez
+dissect → `FlowTable::process` → `Stats::record` → `DnsCache::record` → (canlıda) süreç
+eşleme → `pakiz_flow::annotate` (sentetik `tcp.stream`/`udp.stream`/`tcp.analysis.*`
+alanları) → filtre. Akış analizi durumlu olduğundan paket başına küçük `FlowTag`
+(stream, yön, bayrak bit kümesi, göreli seq/ack) saklanır; yeniden ayrıştırmada (filtre,
+katman ağacı) tekrar eklenir. Dosya modunda analiz indekslemeyle birlikte artımlı
+ilerler (`ANALYZE_BATCH`/tick); filtre analiz edilmiş pakete kadar süzer. Akış ve
+istatistikler kümülatiftir, halka tampondan düşen paketlerden etkilenmez.
+
 ## Kurallar
 - Kütüphane crate'lerinde `thiserror`, binary'de `anyhow`. Üretim kodunda `unwrap`/`expect` yok (testlerde serbest).
 - Dissect zero-copy (`&[u8]`), asla panic yok; sınır dışı okuma → alan `malformed`.

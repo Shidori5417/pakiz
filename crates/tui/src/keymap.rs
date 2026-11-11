@@ -23,6 +23,22 @@ pub enum Action {
     Help,
     Filter,
     Command,
+    /// Seçili paketin akışını izle (Follow Stream).
+    Follow,
+    /// Konuşmalar görünümü.
+    Conversations,
+    /// İstatistik görünümü.
+    Statistics,
+    /// Görünümden ana listeye dön.
+    Back,
+    /// Kaynak/Hedef için DNS ad çözümleme aç/kapa.
+    ToggleResolve,
+    /// Follow: ASCII / Hex / Raw.
+    CycleMode,
+    /// Konuşmalar: sıralama sütununu değiştir.
+    Sort,
+    /// İstatistik: alt sekme (0 tabanlı).
+    SelectTab(u8),
 }
 
 /// Tuş eşlem tablosu (Aşama 9'da config'ten yüklenecek).
@@ -68,6 +84,19 @@ impl Default for Keymap {
             ((K::Char('/'), n), A::Filter),
             ((K::Char(':'), n), A::Command),
             ((K::Char(':'), s), A::Command),
+            ((K::Char('F'), n), A::Follow),
+            ((K::Char('F'), s), A::Follow),
+            ((K::Char('c'), n), A::Conversations),
+            ((K::Char('S'), n), A::Statistics),
+            ((K::Char('S'), s), A::Statistics),
+            ((K::Esc, n), A::Back),
+            ((K::Char('n'), n), A::ToggleResolve),
+            ((K::Char('m'), n), A::CycleMode),
+            ((K::Char('s'), n), A::Sort),
+            ((K::Char('1'), n), A::SelectTab(0)),
+            ((K::Char('2'), n), A::SelectTab(1)),
+            ((K::Char('3'), n), A::SelectTab(2)),
+            ((K::Char('4'), n), A::SelectTab(3)),
         ]
         .into_iter()
         .collect();

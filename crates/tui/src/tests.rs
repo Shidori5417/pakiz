@@ -487,3 +487,360 @@ fn export_writes_only_filtered() {
     std::fs::remove_file(out).unwrap();
     std::fs::remove_file(src).unwrap();
 }
+
+// ------------------------------------------------------------ Aşama 7/8: akış, görünümler
+
+const SYN: u16 = 0x02;
+const ACK: u16 = 0x10;
+const PSH: u16 = 0x08;
+const RST: u16 = 0x04;
+const REQ: &[u8] = b"GET /index.html HTTP/1.1\r\nHost: ornek\r\n\r\n";
+const RESP: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+
+/// eth + ipv4 + tcp (checksum'lar sıfır). `c` = istemci yönü (10.0.0.1:40000 → 10.0.0.2:80).
+fn tcp_pkt(c: bool, seq: u32, ack: u32, flags: u16, payload: &[u8], ts_ms: u64) -> RawPacket {
+    let (sip, dip, sp, dp) = if c {
+        ([10, 0, 0, 1], [10, 0, 0, 2], 40000u16, 80u16)
+    } else {
+        ([10, 0, 0, 2], [10, 0, 0, 1], 80, 40000)
+    };
+    let mut d = vec![0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 6, 0x08, 0x00];
+    let total = u16::try_from(40 + payload.len()).unwrap();
+    d.extend_from_slice(&[0x45, 0]);
+    d.extend_from_slice(&total.to_be_bytes());
+    d.extend_from_slice(&[0, 1, 0x40, 0, 64, 6, 0, 0]);
+    d.extend_from_slice(&sip);
+    d.extend_from_slice(&dip);
+    d.extend_from_slice(&sp.to_be_bytes());
+    d.extend_from_slice(&dp.to_be_bytes());
+    d.extend_from_slice(&seq.to_be_bytes());
+    d.extend_from_slice(&ack.to_be_bytes());
+    d.extend_from_slice(&((5u16 << 12) | flags).to_be_bytes());
+    d.extend_from_slice(&[0xff, 0xff, 0, 0, 0, 0]);
+    d.extend_from_slice(payload);
+    RawPacket {
+        ts: SystemTime::UNIX_EPOCH + Duration::from_millis(ts_ms),
+        orig_len: u32::try_from(d.len()).unwrap(),
+        data: d,
+        ifindex: 1,
+    }
+}
+
+/// 1-3 el sıkışma, 4 istek, 5 isteğin yeniden iletimi, 6 yanıt, 7 ACK.
+fn http_session() -> Vec<RawPacket> {
+    let rl = u32::try_from(REQ.len()).unwrap();
+    let sl = u32::try_from(RESP.len()).unwrap();
+    vec![
+        tcp_pkt(true, 100, 0, SYN, b"", 10),
+        tcp_pkt(false, 500, 101, SYN | ACK, b"", 20),
+        tcp_pkt(true, 101, 501, ACK, b"", 30),
+        tcp_pkt(true, 101, 501, ACK | PSH, REQ, 40),
+        tcp_pkt(true, 101, 501, ACK | PSH, REQ, 250),
+        tcp_pkt(false, 501, 101 + rl, ACK | PSH, RESP, 260),
+        tcp_pkt(true, 101 + rl, 501 + sl, ACK, b"", 270),
+    ]
+}
+
+fn cells(app: &mut App, w: u16, h: u16) -> ratatui::buffer::Buffer {
+    let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+    t.draw(|f| draw(f, app)).unwrap();
+    t.backend().buffer().clone()
+}
+
+/// `needle` içeren ilk ekran satırında, needle'ın ilk hücresi.
+fn cell_of<'a>(
+    buf: &'a ratatui::buffer::Buffer,
+    needle: &str,
+) -> Option<&'a ratatui::buffer::Cell> {
+    let area = buf.area;
+    for y in 0..area.height {
+        let line: String = (0..area.width).map(|x| buf[(x, y)].symbol()).collect();
+        if let Some(bx) = line.find(needle) {
+            let x = line[..bx].chars().count();
+            return Some(&buf[(u16::try_from(x).unwrap(), y)]);
+        }
+    }
+    None
+}
+
+#[test]
+fn analysis_filter_matches_retransmission() {
+    let mut app = app_from(http_session(), 100);
+    app.ingest();
+    app.set_filter("tcp.analysis.retransmission").unwrap();
+    app.ingest();
+    assert_eq!(shown_numbers(&app), vec![5]);
+    for (f, want) in [
+        ("tcp.analysis.flags", vec![5]),
+        ("tcp.stream == 0", (1..=7).collect()),
+        ("tcp.stream == 1", vec![]),
+        ("tcp.seq_rel == 1 && tcp.len > 0", vec![4, 5, 6]),
+        ("tcp.ack_rel == 1 && tcp.len > 0", vec![4, 5]),
+        (
+            "tcp.analysis.duplicate_ack || tcp.analysis.zero_window",
+            vec![],
+        ),
+    ] {
+        app.set_filter(f).unwrap();
+        app.ingest();
+        assert_eq!(shown_numbers(&app), want, "{f}");
+    }
+    // Otomatik tamamlama sentetik alanları bilir.
+    let names: Vec<_> = pakiz_filter::complete("tcp.analysis.re", &app.catalog)
+        .iter()
+        .map(|d| d.name)
+        .collect();
+    assert_eq!(names, ["tcp.analysis.retransmission"]);
+    assert!(app.catalog.get("udp.stream").is_some());
+    // Katman ağacında TCP altında [SEQ/ACK analysis].
+    app.set_filter("").unwrap();
+    app.ingest();
+    app.selected = Some(4);
+    let (d, _) = app.tree().unwrap();
+    let tcp = d.layers.iter().position(|l| l.protocol == "tcp").unwrap();
+    let mut open = HashSet::new();
+    open.insert(vec![tcp]);
+    let rows = flatten(d, &open);
+    let sa = rows
+        .iter()
+        .find(|r| r.label == "[SEQ/ACK analysis]")
+        .unwrap();
+    assert_eq!(sa.depth, 1);
+    assert!(sa.has_children);
+    assert!(rows.iter().any(|r| r.label == "[Stream index: 0]"));
+}
+
+#[test]
+fn list_marks_analysis_rows_and_process_column() {
+    let mut app = app_from(http_session(), 100);
+    app.ingest();
+    let theme = Theme::default();
+    let buf = cells(&mut app, 160, 40);
+    let s = screen(&mut app, 160, 40);
+    assert!(s.contains("Süreç"), "{s}");
+    let c = cell_of(&buf, "[TCP Retransmission]").unwrap();
+    assert_eq!((c.fg, c.bg), (theme.bad_tcp_fg, theme.bad_tcp_bg));
+    // Süreç sütunu boş (canlı değil) ama satırlar çizilir.
+    assert!(app
+        .displayed()
+        .all(|i| app.store.get(i).unwrap().process.is_none()));
+    assert!(s.contains("40000 → 80"));
+}
+
+#[test]
+fn follow_view_renders_both_directions_with_colors() {
+    let mut app = app_from(http_session(), 100);
+    app.ingest();
+    app.selected = Some(3);
+    key(&mut app, KeyCode::Char('F'));
+    assert_eq!(app.view, View::Follow);
+    let theme = Theme::default();
+    let buf = cells(&mut app, 100, 30);
+    let s = screen(&mut app, 100, 30);
+    assert!(s.contains("Follow TCP Stream (tcp.stream 0)"), "{s}");
+    assert!(s.contains("10.0.0.1:40000 ↔ 10.0.0.2:80"));
+    // İstek bir kez (yeniden iletim birleştirmede tekrarlanmaz), yanıt sonra.
+    assert_eq!(s.matches("GET /index.html HTTP/1.1").count(), 1);
+    let req_y = s
+        .lines()
+        .position(|l| l.contains("GET /index.html"))
+        .unwrap();
+    let resp_y = s
+        .lines()
+        .position(|l| l.contains("HTTP/1.1 200 OK"))
+        .unwrap();
+    assert!(req_y < resp_y);
+    assert_eq!(cell_of(&buf, "GET /index").unwrap().fg, theme.follow_client);
+    assert_eq!(
+        cell_of(&buf, "HTTP/1.1 200").unwrap().fg,
+        theme.follow_server
+    );
+    assert!(s.contains("hello"));
+    // Hex ve Raw kipleri.
+    key(&mut app, KeyCode::Char('m'));
+    let s = screen(&mut app, 100, 30);
+    assert!(
+        s.contains("kip: Hex") && s.contains("00000000  47 45 54 20"),
+        "{s}"
+    );
+    key(&mut app, KeyCode::Char('m'));
+    let s = screen(&mut app, 100, 30);
+    assert!(s.contains("kip: Raw") && s.contains("474554202f"));
+    key(&mut app, KeyCode::Char('m'));
+    // Kaydırma sınırlı; Esc geri döner.
+    key(&mut app, KeyCode::Char('G'));
+    let total = app.follow.as_ref().unwrap().total;
+    assert!(app.follow.as_ref().unwrap().offset < total.max(1));
+    key(&mut app, KeyCode::Esc);
+    assert_eq!(app.view, View::Packets);
+    // Akışsız paket: görünüm açılmaz.
+    let mut app = app_from(vec![], 10);
+    app.apply(Action::Follow);
+    assert_eq!(app.view, View::Packets);
+}
+
+#[test]
+fn follow_shows_lost_marker_and_scrolls_large_stream() {
+    let mut pk = vec![
+        tcp_pkt(true, 100, 0, SYN, b"", 10),
+        tcp_pkt(false, 500, 101, SYN | ACK, b"", 20),
+        tcp_pkt(true, 101, 501, ACK, b"", 30),
+        tcp_pkt(true, 101, 501, ACK, b"AAAA", 40),
+        // 6 bayt yakalanmadı.
+        tcp_pkt(true, 111, 501, ACK, b"BBBB", 50),
+        tcp_pkt(true, 115, 501, RST, b"", 60),
+    ];
+    // Ayrı büyük akış: 300 satır.
+    let mut seq = 1000u32;
+    let line = b"satir-satir-satir\n";
+    pk.push(tcp_pkt(false, 999, 0, SYN, b"", 70));
+    for i in 0..300 {
+        pk.push(tcp_pkt(false, seq, 0, ACK, line, 80 + i));
+        seq += u32::try_from(line.len()).unwrap();
+    }
+    let mut app = app_from(pk, 1000);
+    while app.ingest() {}
+    app.selected = Some(4);
+    app.apply(Action::Follow);
+    let s = screen(&mut app, 100, 30);
+    assert!(
+        s.contains("AAAA") && s.contains("[6 bayt eksik]") && s.contains("BBBB"),
+        "{s}"
+    );
+    assert!(s.contains("durum: RST"));
+    // RST satırı kırmızı.
+    app.apply(Action::Back);
+    let theme = Theme::default();
+    assert_eq!(
+        app.store.flow(5).unwrap().flags,
+        pakiz_flow::AnalysisFlags::RST
+    );
+    let buf = cells(&mut app, 160, 40);
+    let c = cell_of(&buf, "40000 → 80 [RST]").unwrap();
+    assert_eq!((c.fg, c.bg), (theme.rst_fg, theme.rst_bg));
+    // Kayıp segment sonrası paket: "Previous segment not captured" (kötü TCP).
+    let c = cell_of(&buf, "[TCP Previous segment not captured]").unwrap();
+    assert_eq!(c.fg, theme.bad_tcp_fg); // seçili satır: zemin seçim rengi
+                                        // Büyük akış: yalnızca görünen satırlar; G sona gider.
+    app.selected = Some(7);
+    app.apply(Action::Follow);
+    let s = screen(&mut app, 100, 30);
+    assert!(s.contains("[1-") && s.contains("/300]"), "{s}");
+    app.apply(Action::Bottom);
+    let s = screen(&mut app, 100, 30);
+    assert!(s.contains("/300/300]") || s.contains("-300/300]"), "{s}");
+}
+
+#[test]
+fn conversations_table_sort_and_filter() {
+    let mut pk = http_session();
+    pk.push(udp_packet(9));
+    pk.push(udp_packet(10));
+    let mut app = app_from(pk, 100);
+    app.ingest();
+    key(&mut app, KeyCode::Char('c'));
+    assert_eq!(app.view, View::Conversations);
+    let s = screen(&mut app, 140, 20);
+    assert!(s.contains("Konuşmalar (2)"), "{s}");
+    assert!(s.contains("10.0.0.1:40000") && s.contains("10.0.0.2:80"));
+    assert!(s.contains("10.0.0.1:1234") && s.contains("10.0.0.2:53"));
+    assert!(s.contains("TCP") && s.contains("UDP") && s.contains("Kurulu"));
+    assert_eq!(app.conv.rows[0].stream.proto, pakiz_flow::Proto::Tcp);
+    // s: paket sayısına göre (TCP 7 > UDP 2) → bayta göre → süre.
+    key(&mut app, KeyCode::Char('s'));
+    assert_eq!(app.conv.sort, ConvSort::Packets);
+    assert!(screen(&mut app, 140, 20).contains("Pkt A→B▼"));
+    assert_eq!(app.conv.rows[0].packets, [5, 2]);
+    // j + Enter: UDP akışını süz.
+    key(&mut app, KeyCode::Char('j'));
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(app.view, View::Packets);
+    assert_eq!(app.filter_text, "udp.stream == 0");
+    app.ingest();
+    assert_eq!(shown_numbers(&app), vec![8, 9]);
+    // :conv komutu da açar.
+    key(&mut app, KeyCode::Char(':'));
+    type_str(&mut app, "conv");
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(app.view, View::Conversations);
+    key(&mut app, KeyCode::Char('q'));
+    assert_eq!(app.view, View::Packets);
+    assert!(!app.quit);
+}
+
+#[test]
+fn stats_view_renders_tabs_and_names() {
+    let mut pk = http_session();
+    pk.push(udp_packet(9));
+    let mut app = app_from(pk, 100);
+    app.ingest();
+    app.analyzer
+        .dns
+        .insert("10.0.0.2".parse().unwrap(), "sunucu.ornek");
+    key(&mut app, KeyCode::Char('S'));
+    assert_eq!(app.view, View::Stats);
+    let s = screen(&mut app, 140, 30);
+    assert!(s.contains("Paket/sn") && s.contains("Bayt/sn"), "{s}");
+    assert!(s.contains("Protokol hiyerarşisi") && s.contains("Top talkers"));
+    assert!(s.contains("toplam 8 paket"));
+    let hier: Vec<&str> = s
+        .lines()
+        .filter(|l| l.contains("tcp") || l.contains("udp"))
+        .collect();
+    assert!(hier.iter().any(|l| l.contains("87.5%")), "{hier:?}"); // 7/8 tcp
+    key(&mut app, KeyCode::Tab);
+    assert_eq!(app.stats_view.tab, StatsTab::Talkers);
+    let s = screen(&mut app, 140, 30);
+    assert!(s.contains("sunucu.ornek") && s.contains("10.0.0.1"), "{s}");
+    key(&mut app, KeyCode::Char('3'));
+    let s = screen(&mut app, 140, 30);
+    assert!(s.contains("IP konuşmaları") && s.contains("10.0.0.2"));
+    key(&mut app, KeyCode::Char('n'));
+    assert!(screen(&mut app, 140, 30).contains("sunucu.ornek"));
+    key(&mut app, KeyCode::Char('4'));
+    let s = screen(&mut app, 140, 30);
+    assert!(s.contains("Hedef port") && s.contains("80") && s.contains("53"));
+    // Ad çözümleme paket listesinde de etkili.
+    key(&mut app, KeyCode::Esc);
+    let s = screen(&mut app, 160, 40);
+    assert!(
+        s.contains("sunucu.ornek") && s.contains("ad çözümleme"),
+        "{s}"
+    );
+    key(&mut app, KeyCode::Char('n'));
+    assert!(!screen(&mut app, 160, 40).contains("sunucu.ornek"));
+    // Yardım yeni tuşları listeler.
+    key(&mut app, KeyCode::Char('?'));
+    let s = screen(&mut app, 100, 40);
+    assert!(s.contains("Follow") && s.contains("konuşmalar") && s.contains("ad çözümleme"));
+}
+
+#[test]
+fn file_mode_analyzes_during_indexing() {
+    let p = tmp_path("pcap");
+    let mut w = pakiz_storage::create(&p, pakiz_storage::Format::from_path(&p)).unwrap();
+    for pk in http_session() {
+        w.write_packet(&pk).unwrap();
+    }
+    w.flush().unwrap();
+    let mut app = App::from_file(pakiz_storage::IndexedFile::open(&p).unwrap(), "f");
+    app.set_filter("tcp.analysis.retransmission").unwrap();
+    while app.ingest() {}
+    assert_eq!(app.store.analyzed(), 7);
+    assert_eq!(shown_numbers(&app), vec![5]);
+    assert_eq!(app.analyzer.stats.total().packets, 7);
+    // Yeniden süzme saklanan özeti kullanır.
+    app.set_filter("tcp.stream == 0 && tcp.len > 0").unwrap();
+    while app.ingest() {}
+    assert_eq!(shown_numbers(&app), vec![4, 5, 6]);
+    let e = app.store.get(4).unwrap();
+    assert!(e.flow.unwrap().flags.has_warning());
+    app.selected = Some(0);
+    app.apply(Action::Follow);
+    let s = screen(&mut app, 100, 30);
+    assert!(
+        s.contains("GET /index.html") && s.contains("HTTP/1.1 200 OK"),
+        "{s}"
+    );
+    std::fs::remove_file(p).unwrap();
+}

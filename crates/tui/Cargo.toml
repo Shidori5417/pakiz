@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 pakiz-dissect.workspace = true
 pakiz-filter.workspace = true
+pakiz-flow.workspace = true
+pakiz-stats.workspace = true
 ratatui.workspace = true
 pakiz-storage.workspace = true
 signal-hook.workspace = true

@@ -296,25 +296,16 @@ impl FlowTable {
         let mut v: Vec<_> = self
             .flows
             .iter()
-            .map(|(&id, f)| Conversation {
-                stream: id,
-                key: f.key,
-                client: f.client,
-                server: if f.client == f.key.a {
-                    f.key.b
-                } else {
-                    f.key.a
-                },
-                packets: f.packets,
-                bytes: f.bytes,
-                first: f.first,
-                last: f.last,
-                duration: f.last.duration_since(f.first).unwrap_or_default(),
-                state: f.tcp.as_ref().map(|t| t.state),
-            })
+            .map(|(&id, f)| conversation_of(id, f))
             .collect();
         v.sort_by_key(|c| c.stream);
         v
+    }
+
+    /// Tek akışın özeti (bellekte değilse `None`).
+    #[must_use]
+    pub fn conversation(&self, id: StreamId) -> Option<Conversation> {
+        self.flows.get(&id).map(|f| conversation_of(id, f))
     }
 
     /// Yakalama sonu: tüm TCP birleştiricilerdeki boşlukları atlayıp teslim eder.
@@ -462,6 +453,25 @@ impl FlowTable {
             self.lru.pop_first();
             self.remove(id);
         }
+    }
+}
+
+fn conversation_of(id: StreamId, f: &Flow) -> Conversation {
+    Conversation {
+        stream: id,
+        key: f.key,
+        client: f.client,
+        server: if f.client == f.key.a {
+            f.key.b
+        } else {
+            f.key.a
+        },
+        packets: f.packets,
+        bytes: f.bytes,
+        first: f.first,
+        last: f.last,
+        duration: f.last.duration_since(f.first).unwrap_or_default(),
+        state: f.tcp.as_ref().map(|t| t.state),
     }
 }
 

@@ -1030,6 +1030,8 @@ dependencies = [
  "pakiz-capture",
  "pakiz-dissect",
  "pakiz-filter",
+ "pakiz-flow",
+ "pakiz-stats",
  "pakiz-storage",
  "pakiz-tui",
  "tokio",
@@ -1094,6 +1096,8 @@ version = "0.1.0"
 dependencies = [
  "pakiz-dissect",
  "pakiz-filter",
+ "pakiz-flow",
+ "pakiz-stats",
  "pakiz-storage",
  "ratatui",
  "signal-hook",

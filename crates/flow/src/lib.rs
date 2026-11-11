@@ -8,14 +8,18 @@
 //! - [`Stream`]: Follow Stream görünümü ([`Stream::chunks`]) ve uygulama
 //!   katmanı için birleşik bayt ([`Stream::data`]).
 //! - [`FlowTable::conversations`]: her iki protokol için konuşma özeti.
+//! - [`FlowTag`] + [`annotate`]: saklanabilir paket başı özet ve filtre için
+//!   sentetik `tcp.stream`/`tcp.analysis.*` alanları ([`FIELDS`]).
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::assert_is_empty))]
 
+mod annotate;
 mod key;
 mod reassembly;
 mod stream;
 mod table;
 
+pub use annotate::{annotate, AnalysisFlags, FlowTag, FIELDS};
 pub use key::{Dir, FlowKey, KeyDir, Proto};
 pub use reassembly::{Delivery, Reassembler};
 pub use stream::{render_ascii, render_hex, render_raw, Chunk, Marker, Stream, StreamId};

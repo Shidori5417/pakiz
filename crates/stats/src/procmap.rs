@@ -157,6 +157,13 @@ impl ProcessResolver {
             .copied()
     }
 
+    /// Yalnızca tam (yerel, uzak) eşleşme.
+    fn find_exact(&self, proto: Transport, local: SocketAddr, remote: SocketAddr) -> Option<u64> {
+        self.exact
+            .get(&(proto, canon_sock(local), canon_sock(remote)))
+            .copied()
+    }
+
     /// Önbellekten bakar; yoksa (hız sınırı içinde) yenileyip tekrar dener.
     pub fn lookup(
         &mut self,
@@ -175,23 +182,41 @@ impl ProcessResolver {
     }
 
     /// Paketin iki yönünü dener: önce kaynak yerel, sonra hedef yerel.
+    ///
+    /// Tam (yerel, uzak) soket eşleşmesi, yalnızca yerel adres / joker
+    /// dinleyici eşleşmesinden önce gelir; tam eşleşme yoksa (hız sınırı
+    /// içinde) tablo yenilenir. Böylece aynı makinedeki istemci (ör. `curl`)
+    /// sunucunun dinleyen soketiyle karıştırılmaz.
     pub fn lookup_packet(&mut self, d: &Dissection) -> Option<&ProcessInfo> {
+        self.packet_inode(d, false).and_then(|i| self.procs.get(&i))
+    }
+
+    /// Yalnızca tam (yerel, uzak) soket eşleşmesi (gerekirse hız sınırı içinde
+    /// yeniler). Akış başına sonucu önbelleğe almak isteyen çağıranlar için.
+    pub fn lookup_packet_exact(&mut self, d: &Dissection) -> Option<&ProcessInfo> {
+        self.packet_inode(d, true).and_then(|i| self.procs.get(&i))
+    }
+
+    fn packet_inode(&mut self, d: &Dissection, exact_only: bool) -> Option<u64> {
         let ep = Endpoints::from_dissection(d)?;
         let (proto, ..) = ep.l4?;
         let (s, t) = (ep.src_sock()?, ep.dst_sock()?);
-        let hit = |me: &Self| {
-            [(s, t), (t, s)]
-                .into_iter()
+        let dirs = [(s, t), (t, s)];
+        let exact = |me: &Self| {
+            dirs.into_iter()
+                .find_map(|(l, r)| me.find_exact(proto, l, r))
+                .filter(|i| me.procs.contains_key(i))
+        };
+        let any = |me: &Self| {
+            dirs.into_iter()
                 .find_map(|(l, r)| me.find_inode(proto, l, r))
                 .filter(|i| me.procs.contains_key(i))
         };
-        let inode = if let Some(i) = hit(self) {
-            i
-        } else {
-            self.refresh();
-            hit(self)?
-        };
-        self.procs.get(&inode)
+        if let Some(i) = exact(self) {
+            return Some(i);
+        }
+        self.refresh();
+        exact(self).or_else(|| if exact_only { None } else { any(self) })
     }
 }
 

@@ -6,6 +6,7 @@ use std::collections::{HashMap, VecDeque};
 use std::time::SystemTime;
 
 use pakiz_dissect::{RawPacket, Registry, Summary};
+use pakiz_flow::FlowTag;
 use pakiz_storage::IndexedFile;
 
 /// Depolanan tek paket: ham veri + önceden hesaplanmış özet.
@@ -16,6 +17,10 @@ pub struct Entry {
     pub raw: RawPacket,
     pub summary: Summary,
     pub malformed: bool,
+    /// İlk geçişte üretilen akış/analiz özeti.
+    pub flow: Option<FlowTag>,
+    /// Canlı yakalamada paketin yerel süreci (bir kez çözülür).
+    pub process: Option<String>,
 }
 
 /// Dosya modunda diskten okunup ayrıştırılmış paketlerin küçük önbelleği (FIFO tahliye).
@@ -42,6 +47,8 @@ struct FileMode {
     registry: Registry,
     cache: RefCell<FileCache>,
     error: Option<String>,
+    /// İndeks sırasıyla analiz edilmiş paketlerin akış özetleri.
+    flows: Vec<Option<FlowTag>>,
 }
 
 /// Paket deposu. Bellek modunda en fazla `max` paket (halka tampon); dosya modunda
@@ -53,7 +60,12 @@ pub struct PacketStore {
 }
 
 /// Ayrıştırıp [`Entry`] kurar.
-pub(crate) fn make_entry(registry: &Registry, number: u64, raw: RawPacket) -> Entry {
+pub(crate) fn make_entry(
+    registry: &Registry,
+    number: u64,
+    raw: RawPacket,
+    flow: Option<FlowTag>,
+) -> Entry {
     let d = registry.dissect(&raw);
     let malformed = d.layers.iter().any(pakiz_dissect::Layer::is_malformed);
     Entry {
@@ -61,6 +73,8 @@ pub(crate) fn make_entry(registry: &Registry, number: u64, raw: RawPacket) -> En
         raw,
         summary: d.summary,
         malformed,
+        flow,
+        process: None,
     }
 }
 
@@ -93,6 +107,7 @@ impl PacketStore {
                     order: VecDeque::new(),
                 }),
                 error: None,
+                flows: Vec::new(),
             })),
             next_number: 1,
             first_ts: None,
@@ -147,8 +162,41 @@ impl PacketStore {
         }
     }
 
+    /// Analizi tamamlanmış paket sayısı (dosyada indeks önünde kalabilir;
+    /// bellek modunda her zaman `len`).
+    #[must_use]
+    pub fn analyzed(&self) -> usize {
+        match &self.mode {
+            Mode::Memory { buf, .. } => buf.len(),
+            Mode::File(fm) => fm.flows.len(),
+        }
+    }
+
+    /// Dosya modu: sıradaki (`analyzed()`.) paketin akış özetini kaydeder.
+    pub fn push_flow(&mut self, flow: Option<FlowTag>) {
+        if let Mode::File(fm) = &mut self.mode {
+            fm.flows.push(flow);
+        }
+    }
+
+    /// `idx`. paketin akış özeti (paketi okumadan).
+    #[must_use]
+    pub fn flow(&self, idx: usize) -> Option<FlowTag> {
+        match &self.mode {
+            Mode::Memory { buf, .. } => buf.get(idx).and_then(|e| e.flow),
+            Mode::File(fm) => fm.flows.get(idx).copied().flatten(),
+        }
+    }
+
     /// Paketi ekler (yalnızca bellek modu); taşma olursa düşen paket sayısını (0 veya 1) döner.
-    pub fn push(&mut self, raw: RawPacket, summary: Summary, malformed: bool) -> usize {
+    pub fn push(
+        &mut self,
+        raw: RawPacket,
+        summary: Summary,
+        malformed: bool,
+        flow: Option<FlowTag>,
+        process: Option<String>,
+    ) -> usize {
         let Mode::Memory { buf, max, evicted } = &mut self.mode else {
             return 0;
         };
@@ -164,6 +212,8 @@ impl PacketStore {
             raw,
             summary,
             malformed,
+            flow,
+            process,
         });
         self.next_number += 1;
         dropped
@@ -192,14 +242,19 @@ impl PacketStore {
                     file,
                     registry,
                     cache,
+                    flows,
                     ..
                 } = &**fm;
+                let flow = flows.get(idx).copied().flatten();
                 let mut c = cache.borrow_mut();
                 if let Some(e) = c.map.get(&idx) {
-                    return Some(Cow::Owned(e.clone()));
+                    // Analiz önbelleğe alındıktan sonra tamamlanmış olabilir.
+                    let mut e = e.clone();
+                    e.flow = flow;
+                    return Some(Cow::Owned(e));
                 }
                 let raw = file.get(idx).ok()?;
-                let e = make_entry(registry, idx as u64 + 1, raw);
+                let e = make_entry(registry, idx as u64 + 1, raw, flow);
                 if c.order.len() >= FileCache::CAP {
                     if let Some(old) = c.order.pop_front() {
                         c.map.remove(&old);

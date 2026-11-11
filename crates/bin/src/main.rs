@@ -11,10 +11,11 @@ use std::time::{Duration, SystemTime};
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use pakiz_capture::{list_interfaces, start_capture, CaptureConfig, CaptureHandle, CaptureMode};
-use pakiz_dissect::{RawPacket, Registry};
-use pakiz_filter::{bpf, FieldCatalog, Filter, FilterError};
+use pakiz_dissect::RawPacket;
+use pakiz_filter::{bpf, Filter, FilterError};
+use pakiz_flow::FlowTable;
 use pakiz_storage::{CaptureReader, CaptureWriter, Format, IndexedFile};
-use pakiz_tui::{App, PacketSource, Tui};
+use pakiz_tui::{catalog, fmt_bytes, Analyzer, App, PacketSource, Tui};
 use tokio::signal::unix::{signal, SignalKind};
 
 #[derive(Debug, Parser)]
@@ -55,6 +56,12 @@ struct Cli {
     /// TUI'de bellekte tutulacak en fazla paket (eskiler düşer)
     #[arg(long, default_value_t = pakiz_tui::PacketStore::DEFAULT_MAX)]
     max_packets: usize,
+    /// IP adresleri yerine DNS cevaplarından öğrenilen adları göster (TUI'de `n`)
+    #[arg(short = 'n', long = "resolve")]
+    resolve: bool,
+    /// Sonda özet istatistik yaz (protokol dağılımı, top talkers); TUI açılmaz
+    #[arg(long, conflicts_with = "count")]
+    stats: bool,
 }
 
 /// Canlı yakalama kaynağı: kanal + kernel istatistikleri.
@@ -137,7 +144,7 @@ fn display_filter(cli: &Cli) -> Result<Option<Filter>> {
         .as_deref()
         .filter(|s| !s.trim().is_empty())
         .map(|src| {
-            Filter::compile(src, &FieldCatalog::default())
+            Filter::compile(src, &catalog())
                 .map_err(|e| filter_error("display filter (-Y)", src, &e))
         })
         .transpose()
@@ -160,37 +167,129 @@ fn to_sock_filter(prog: &[bpf::SockFilter]) -> Vec<pakiz_capture::sock_filter> {
         .collect()
 }
 
-/// Paketi bir kez ayrıştırır; filtre yoksa veya eşleşirse satırı yazar ve `true` döner.
-fn emit(
-    reg: &Registry,
-    filter: Option<&Filter>,
+/// `--no-tui` satır çıktısı durumu: işleme hattı + filtre + biçim ayarları.
+struct LineOut {
+    an: Analyzer,
+    filter: Option<Filter>,
     print: bool,
-    number: u64,
-    first: &mut Option<SystemTime>,
-    p: &RawPacket,
-) -> bool {
-    let d = reg.dissect_numbered(p, Some(number));
-    if filter.is_some_and(|f| !f.matches(&d, p)) {
-        return false;
-    }
-    if print {
-        print_line(&d.summary, number, first, p);
-    }
-    true
+    resolve: bool,
+    first: Option<SystemTime>,
 }
 
-fn print_line(
-    s: &pakiz_dissect::Summary,
-    number: u64,
-    first: &mut Option<SystemTime>,
-    p: &RawPacket,
-) {
-    let t0 = *first.get_or_insert(p.ts);
-    let rel = p.ts.duration_since(t0).unwrap_or_default().as_secs_f64();
-    println!(
-        "{number:>6} {rel:>11.6} {} → {} {} {} {}",
-        s.src, s.dst, s.protocol, s.len, s.info
-    );
+impl LineOut {
+    fn new(cli: &Cli, print: bool, live: bool) -> Result<Self> {
+        // Satır modunda Follow verisi gerekmez: birleştirme tamponu küçük tutulur.
+        let flows = FlowTable::with_config(pakiz_flow::Config {
+            max_buffer: 64 << 10,
+            gap_threshold: 64 << 10,
+            ..pakiz_flow::Config::default()
+        })?;
+        let mut an = Analyzer::new(flows);
+        if live {
+            an.enable_processes();
+        }
+        Ok(Self {
+            an,
+            filter: display_filter(cli)?,
+            print,
+            resolve: cli.resolve,
+            first: None,
+        })
+    }
+
+    /// Paketi bir kez hattan geçirir (akış/istatistik tüm paketleri sayar);
+    /// filtre yoksa veya eşleşirse satırı yazar ve `true` döner.
+    fn emit(&mut self, number: u64, p: &RawPacket) -> bool {
+        let a = self.an.analyze(number, p);
+        if self
+            .filter
+            .as_ref()
+            .is_some_and(|f| !f.matches(&a.dissection, p))
+        {
+            return false;
+        }
+        if self.print {
+            let s = &a.dissection.summary;
+            let t0 = *self.first.get_or_insert(p.ts);
+            let rel = p.ts.duration_since(t0).unwrap_or_default().as_secs_f64();
+            let (src, dst) = if self.resolve {
+                (self.an.resolve(&s.src), self.an.resolve(&s.dst))
+            } else {
+                (s.src.as_str(), s.dst.as_str())
+            };
+            let tag = a.flow.map(|t| t.flags.info_prefix()).unwrap_or_default();
+            let proc = if self.an.processes_enabled() {
+                format!(" [{}]", a.process.as_deref().unwrap_or("-"))
+            } else {
+                String::new()
+            };
+            println!(
+                "{number:>6} {rel:>11.6} {src} → {dst} {} {}{proc} {tag}{}",
+                s.protocol, s.len, s.info
+            );
+        }
+        true
+    }
+
+    /// `--stats` özeti.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    fn print_stats(&self) {
+        let st = &self.an.stats;
+        let total = st.total();
+        let (pps, bps) = st.average();
+        println!();
+        println!("=== İstatistik ===");
+        println!(
+            "toplam: {} paket, {} · ortalama {pps:.1} paket/sn, {}/sn · akış: {}",
+            total.packets,
+            fmt_bytes(total.bytes),
+            fmt_bytes(bps as u64),
+            self.an.flows.conversations().len()
+        );
+        let pct = |n: u64, t: u64| {
+            if t == 0 {
+                0.0
+            } else {
+                n as f64 * 100.0 / t as f64
+            }
+        };
+        println!("\n--- Protokol hiyerarşisi ---");
+        println!(
+            "{:<28} {:>9} {:>7} {:>11}",
+            "PROTOKOL", "PAKET", "%", "BAYT"
+        );
+        for n in st.protocol_hierarchy() {
+            println!(
+                "{:<28} {:>9} {:>6.1}% {:>11}",
+                format!("{}{}", "  ".repeat(n.depth), n.protocol),
+                n.counter.packets,
+                pct(n.counter.packets, total.packets),
+                fmt_bytes(n.counter.bytes)
+            );
+        }
+        println!("\n--- Top talkers ---");
+        println!(
+            "{:<40} {:>9} {:>11} {:>9} {:>11}",
+            "ADRES", "GÖN.PKT", "GÖN.BAYT", "ALI.PKT", "ALI.BAYT"
+        );
+        for (ip, t) in st.top_talkers(10) {
+            let name = match self.an.name_for(ip) {
+                Some(n) => format!("{ip} ({n})"),
+                None => ip.to_string(),
+            };
+            println!(
+                "{name:<40} {:>9} {:>11} {:>9} {:>11}",
+                t.tx.packets,
+                fmt_bytes(t.tx.bytes),
+                t.rx.packets,
+                fmt_bytes(t.rx.bytes)
+            );
+        }
+    }
 }
 
 /// `-r` (TUI'siz): satır yaz (`--no-tui`) ve/veya `-w` ile başka dosyaya dönüştür.
@@ -198,13 +297,11 @@ fn run_read(path: &Path, cli: &Cli) -> Result<()> {
     let mut reader =
         CaptureReader::open(path).with_context(|| format!("{} açılamadı", path.display()))?;
     let mut writer = cli.write.as_deref().map(create_writer).transpose()?;
-    let filter = display_filter(cli)?;
-    let reg = Registry::default();
+    let mut out = LineOut::new(cli, cli.no_tui, false)?;
     let (mut number, mut written) = (0u64, 0u64);
-    let mut first = None;
     while let Some(p) = reader.next_packet().context("dosya okunamadı")? {
         number += 1;
-        if !emit(&reg, filter.as_ref(), cli.no_tui, number, &mut first, &p) {
+        if !out.emit(number, &p) {
             continue;
         }
         if let Some(w) = writer.as_mut() {
@@ -215,6 +312,9 @@ fn run_read(path: &Path, cli: &Cli) -> Result<()> {
     if let (Some(w), Some(out)) = (writer.as_mut(), cli.write.as_deref()) {
         w.flush().context("dosyaya yazılamadı")?;
         eprintln!("{written} paket yazıldı: {}", out.display());
+    }
+    if cli.stats {
+        out.print_stats();
     }
     Ok(())
 }
@@ -305,16 +405,14 @@ async fn run_count(iface: String, cli: &Cli) -> Result<()> {
 }
 
 async fn run_lines(iface: String, cli: &Cli) -> Result<()> {
-    let filter = display_filter(cli)?;
+    let mut out = LineOut::new(cli, true, true)?;
     let mut writer = cli.write.as_deref().map(create_writer).transpose()?;
     let (rx, handle) = open(iface, cli, false)?;
-    let reg = Registry::default();
     let mut number = 0u64;
-    let mut first: Option<SystemTime> = None;
     run_loop(handle, Duration::from_millis(20), |_| {
         for p in rx.try_iter() {
             number += 1;
-            if !emit(&reg, filter.as_ref(), true, number, &mut first, &p) {
+            if !out.emit(number, &p) {
                 continue;
             }
             if let Some(w) = writer.as_mut() {
@@ -326,7 +424,11 @@ async fn run_lines(iface: String, cli: &Cli) -> Result<()> {
         }
         Ok(())
     })
-    .await
+    .await?;
+    if cli.stats {
+        out.print_stats();
+    }
+    Ok(())
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -338,12 +440,12 @@ async fn main() -> Result<()> {
     // Terminal hazırlanmadan önce filtre hatalarını bildir.
     display_filter(&cli)?;
     if let Some(path) = cli.read.as_deref() {
-        if !cli.no_tui && cli.write.is_none() {
+        if !cli.no_tui && cli.write.is_none() && !cli.stats {
             return run_tui_file(path, &cli);
         }
         return run_read(path, &cli);
     }
-    if !cli.count && !cli.no_tui {
+    if !cli.count && !cli.no_tui && !cli.stats {
         return run_tui(&cli);
     }
     let Some(iface) = cli.interface.clone() else {
@@ -399,6 +501,8 @@ fn run_tui(cli: &Cli) -> Result<()> {
         ui_dropped,
     };
     let mut app = App::new(Box::new(src), cli.max_packets);
+    app.enable_live();
+    app.resolve_names = cli.resolve;
     set_initial_filter(&mut app, cli)?;
     let res = tui.run(&mut app);
     // Kaynağı bırakmak yakalamayı durdurur; yazıcı kanal kapanınca bitip flush eder.
@@ -419,6 +523,7 @@ fn run_tui(cli: &Cli) -> Result<()> {
 fn run_tui_file(path: &Path, cli: &Cli) -> Result<()> {
     let file = IndexedFile::open(path).with_context(|| format!("{} açılamadı", path.display()))?;
     let mut app = App::from_file(file, path.display().to_string());
+    app.resolve_names = cli.resolve;
     set_initial_filter(&mut app, cli)?;
     let mut tui = Tui::new().context("terminal hazırlanamadı")?;
     tui.run(&mut app)?;
@@ -483,7 +588,7 @@ mod tests {
             sock.send_to(b"y", "127.0.0.1:47999").unwrap();
         }
         std::thread::sleep(Duration::from_millis(300));
-        let reg = Registry::default();
+        let reg = pakiz_dissect::Registry::default();
         let got: Vec<String> = rx
             .try_iter()
             .map(|p| reg.dissect(&p).summary.info)

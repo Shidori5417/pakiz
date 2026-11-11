@@ -5,12 +5,13 @@ use std::ops::Range;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Tabs};
 use ratatui::Frame;
 
 use crate::app::{App, FilterState, InputKind, InputLine, Panel};
 use crate::theme::Theme;
 use crate::tree::highlight_range;
+use crate::views::{draw_conversations, draw_follow, draw_stats, View};
 
 const HELP: &[(&str, &str)] = &[
     ("j / k, ↓ / ↑", "aşağı / yukarı"),
@@ -22,9 +23,18 @@ const HELP: &[(&str, &str)] = &[
     ("p", "duraklat / devam"),
     ("a", "otomatik kaydırma"),
     ("/", "filtre (Tab tamamla, ↑/↓ geçmiş)"),
-    (":", "komut (:q çıkış, :w dosya)"),
+    (":", "komut (:q :w dosya :follow :conv :stats)"),
+    ("F", "seçili akışı izle (Follow Stream)"),
+    ("c", "konuşmalar tablosu"),
+    ("S", "istatistikler (grafik + tablolar)"),
+    ("n", "DNS ad çözümleme aç/kapa"),
+    ("m", "Follow: ASCII / Hex / Raw"),
+    ("s", "Konuşmalar: sıralama sütunu"),
+    ("Enter", "Konuşmalar: akışa filtrele"),
+    ("Tab / 1-4", "İstatistik: alt sekme"),
+    ("Esc / q", "görünümden geri"),
     ("?", "bu yardım"),
-    ("q", "çıkış"),
+    ("q", "çıkış (ana listede)"),
     ("fare", "tıkla: seç, tekerlek: kaydır"),
 ];
 
@@ -59,20 +69,33 @@ fn keep_visible(offset: &mut usize, sel: usize, height: usize) {
 /// Tüm ekranı çizer.
 pub fn draw(f: &mut Frame, app: &mut App) {
     let input_h = u16::from(app.input.is_some());
-    let [list, tree, hex, input, status] = Layout::vertical([
-        Constraint::Percentage(45),
-        Constraint::Percentage(30),
+    let [tabs, body, input, status] = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Min(4),
         Constraint::Length(input_h),
         Constraint::Length(1),
     ])
     .areas(f.area());
-    app.areas.list = list;
-    app.areas.tree = tree;
-    app.areas.hex = hex;
-    draw_list(f, app, list);
-    draw_tree(f, app, tree);
-    draw_hex(f, app, hex);
+    draw_tabs(f, app, tabs);
+    match app.view {
+        View::Packets => {
+            let [list, tree, hex] = Layout::vertical([
+                Constraint::Percentage(45),
+                Constraint::Percentage(30),
+                Constraint::Min(4),
+            ])
+            .areas(body);
+            app.areas.list = list;
+            app.areas.tree = tree;
+            app.areas.hex = hex;
+            draw_list(f, app, list);
+            draw_tree(f, app, tree);
+            draw_hex(f, app, hex);
+        }
+        View::Follow => draw_follow(f, app, body),
+        View::Conversations => draw_conversations(f, app, body),
+        View::Stats => draw_stats(f, app, body),
+    }
     if let Some(inp) = &app.input {
         f.render_widget(input_line(inp, &app.theme), input);
     }
@@ -81,6 +104,22 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.show_help {
         draw_help(f, &app.theme);
     }
+}
+
+/// Üst sekme çubuğu: görünümler.
+fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
+    let idx = View::ALL.iter().position(|&v| v == app.view).unwrap_or(0);
+    f.render_widget(
+        Tabs::new(View::ALL.iter().map(|v| v.title()))
+            .select(idx)
+            .style(Style::default().bg(app.theme.status_bg))
+            .highlight_style(
+                Style::default()
+                    .fg(app.theme.border_focus)
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+            ),
+        area,
+    );
 }
 
 /// Giriş satırı. Filtrede arka plan geçerliyse yeşil, hatalıysa kırmızı; hata
@@ -176,28 +215,39 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     app.list_offset = app.list_offset.min(max_off);
     let theme = &app.theme;
     let end = (app.list_offset + visible).min(app.displayed_len());
+    let resolve = app.resolve_names;
+    let an = &app.analyzer;
     let rows = (app.list_offset..end).filter_map(|i| {
         let e = app.store.get(app.store_index(i)?)?;
         let s = &e.summary;
-        let mut style = Style::default().fg(theme.protocol_color(s.protocol, e.malformed));
+        let flags = e.flow.map(|t| t.flags).unwrap_or_default();
+        let mut style = theme
+            .analysis_style(flags)
+            .unwrap_or_else(|| Style::default().fg(theme.protocol_color(s.protocol, e.malformed)));
         if Some(i) == app.selected {
             style = style.bg(theme.selected_bg).add_modifier(Modifier::BOLD);
         }
+        let (src, dst) = if resolve {
+            (an.resolve(&s.src).to_owned(), an.resolve(&s.dst).to_owned())
+        } else {
+            (s.src.clone(), s.dst.clone())
+        };
         Some(
             Row::new(vec![
                 Cell::from(e.number.to_string()),
                 Cell::from(format!("{:.6}", app.store.rel_time(&e))),
-                Cell::from(s.src.clone()),
-                Cell::from(s.dst.clone()),
+                Cell::from(src),
+                Cell::from(dst),
                 Cell::from(s.protocol),
                 Cell::from(s.len.to_string()),
-                Cell::from(s.info.clone()),
+                Cell::from(e.process.clone().unwrap_or_default()),
+                Cell::from(format!("{}{}", flags.info_prefix(), s.info)),
             ])
             .style(style),
         )
     });
     let header = Row::new([
-        "No", "Zaman", "Kaynak", "Hedef", "Protokol", "Uzunluk", "Bilgi",
+        "No", "Zaman", "Kaynak", "Hedef", "Protokol", "Uzunluk", "Süreç", "Bilgi",
     ])
     .style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED));
     let widths = [
@@ -207,6 +257,7 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
         Constraint::Length(22),
         Constraint::Length(8),
         Constraint::Length(7),
+        Constraint::Length(12),
         Constraint::Fill(1),
     ];
     let table = Table::new(rows, widths).header(header).block(block(
@@ -400,6 +451,9 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     }
     if !app.filter_text.is_empty() {
         parts.push(Span::raw(format!("│ filtre: {} ", app.filter_text)));
+    }
+    if app.resolve_names {
+        parts.push(Span::raw("│ ad çözümleme "));
     }
     parts.push(Span::raw("│ ?: yardım"));
     f.render_widget(

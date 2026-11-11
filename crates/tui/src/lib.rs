@@ -1,7 +1,9 @@
-//! pakiz-tui: ratatui + crossterm arayüzü (paket listesi / katman ağacı / hex).
+//! pakiz-tui: ratatui + crossterm arayüzü (paket listesi / katman ağacı / hex,
+//! Follow Stream, konuşmalar, istatistik) ve ortak paket işleme hattı ([`Analyzer`]).
 
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
+mod analyzer;
 mod app;
 mod keymap;
 mod source;
@@ -9,6 +11,7 @@ mod store;
 mod theme;
 mod tree;
 mod ui;
+mod views;
 
 use std::io::{self, Stdout};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,9 +30,10 @@ use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, List, ListState};
 use ratatui::Terminal;
 
+pub use analyzer::{catalog, Analyzed, Analyzer};
 pub use app::{
-    App, Completion, FilterState, InputKind, InputLine, Panel, DRAIN_BATCH, FILTER_BATCH,
-    INDEX_BATCH,
+    App, Completion, FilterState, InputKind, InputLine, Panel, ANALYZE_BATCH, DRAIN_BATCH,
+    FILTER_BATCH, INDEX_BATCH,
 };
 pub use keymap::{Action, Keymap};
 pub use source::{PacketSource, VecSource};
@@ -37,6 +41,7 @@ pub use store::{Entry, PacketStore};
 pub use theme::Theme;
 pub use tree::{flatten, highlight_range, TreeRow};
 pub use ui::{draw, hex_line};
+pub use views::{fmt_bytes, ConvSort, ConvView, FollowMode, FollowView, StatsTab, StatsView, View};
 
 /// Çizimler arası en kısa süre (~30 fps).
 pub const FRAME: Duration = Duration::from_millis(33);
