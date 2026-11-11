@@ -134,10 +134,7 @@ impl Drop for CaptureHandle {
 }
 
 fn is_loopback(name: &str) -> bool {
-    std::fs::read_to_string(format!("/sys/class/net/{name}/flags"))
-        .ok()
-        .and_then(|s| u32::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok())
-        .is_some_and(|f| f & 0x8 != 0) // IFF_LOOPBACK
+    list_interfaces().is_ok_and(|l| l.iter().any(|i| i.name == name && i.loopback))
 }
 
 /// Yakalamayı ayrı bir OS thread'inde başlatır.

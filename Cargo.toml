@@ -11,6 +11,8 @@ license = "MIT"
 pakiz-dissect = { path = "crates/dissect" }
 pakiz-capture = { path = "crates/capture" }
 pakiz-tui = { path = "crates/tui" }
+pakiz-storage = { path = "crates/storage" }
+signal-hook = "0.3"
 ratatui = "0.30"
 libc = "0.2"
 thiserror = "2"

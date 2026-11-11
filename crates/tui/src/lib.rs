@@ -11,6 +11,8 @@ mod tree;
 mod ui;
 
 use std::io::{self, Stdout};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ratatui::backend::CrosstermBackend;
@@ -25,7 +27,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, List, ListState};
 use ratatui::Terminal;
 
-pub use app::{App, InputKind, InputLine, Panel, DRAIN_BATCH};
+pub use app::{App, InputKind, InputLine, Panel, DRAIN_BATCH, INDEX_BATCH};
 pub use keymap::{Action, Keymap};
 pub use source::{PacketSource, VecSource};
 pub use store::{Entry, PacketStore};
@@ -117,7 +119,15 @@ impl Tui {
             .checked_sub(FRAME)
             .unwrap_or_else(Instant::now);
         let mut last_status = Instant::now();
+        // SIGTERM/SIGHUP: döngüden temiz çık ki `Drop` terminali geri yüklesin.
+        let term = Arc::new(AtomicBool::new(false));
+        for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGHUP] {
+            signal_hook::flag::register(sig, Arc::clone(&term))?;
+        }
         while !app.quit {
+            if term.load(Ordering::Relaxed) {
+                break;
+            }
             dirty |= app.ingest();
             if last_status.elapsed() >= Duration::from_secs(1) {
                 // Düşen paket sayacı gibi kaynak istatistikleri için.

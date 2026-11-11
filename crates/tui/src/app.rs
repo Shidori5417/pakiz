@@ -9,13 +9,16 @@ use ratatui::crossterm::event::{
 use ratatui::layout::{Position, Rect};
 
 use crate::keymap::{Action, Keymap};
-use crate::source::PacketSource;
+use crate::source::{PacketSource, VecSource};
 use crate::store::PacketStore;
 use crate::theme::Theme;
 use crate::tree::{flatten, NodePath, TreeRow};
 
 /// Tek seferde kaynaktan çekilecek en fazla paket.
 pub const DRAIN_BATCH: usize = 50_000;
+
+/// Dosya modunda her tick'te indekslenecek en fazla paket.
+pub const INDEX_BATCH: usize = 20_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Panel {
@@ -81,6 +84,8 @@ pub struct App {
     /// Hex panelinin son takip ettiği vurgu başlangıcı.
     pub(crate) last_hl: Option<usize>,
     max_pending: usize,
+    /// Durum çubuğunda gösterilen son komut sonucu.
+    pub message: Option<String>,
 }
 
 impl App {
@@ -112,6 +117,62 @@ impl App {
             areas: Areas::default(),
             last_hl: None,
             max_pending: max_packets.max(1),
+            message: None,
+        }
+    }
+
+    /// Dosya kaynağı: paketler belleğe alınmaz, indeks artımlı olarak [`App::ingest`]
+    /// içinde ilerletilir.
+    #[must_use]
+    pub fn from_file(file: pakiz_storage::IndexedFile, name: impl Into<String>) -> Self {
+        let src = VecSource {
+            name: name.into(),
+            packets: VecDeque::new(),
+        };
+        let mut app = Self::new(Box::new(src), 1);
+        app.store = PacketStore::from_file(file);
+        app.autoscroll = false;
+        app
+    }
+
+    /// Gösterilen paketlerin store indeksleri (sırayla).
+    ///
+    /// Şimdilik tüm paketler; Aşama 5'te display filter buraya bağlanacak ve
+    /// liste, dışa aktarma vb. yalnızca bu indeksleri kullanacak.
+    pub fn displayed(&self) -> impl Iterator<Item = usize> + '_ {
+        0..self.store.len()
+    }
+
+    /// Gösterilen paketleri `path`'e yazar (biçim uzantıdan); yazılan sayıyı döner.
+    /// Dosya modunda önce indeksleme tamamlanır.
+    ///
+    /// # Errors
+    /// Dosya oluşturma/yazma hatası.
+    pub fn export(&mut self, path: &str) -> pakiz_storage::Result<usize> {
+        while self.store.index_more(INDEX_BATCH) > 0 {}
+        let mut w = pakiz_storage::create(path, pakiz_storage::Format::from_path(path))?;
+        let mut n = 0;
+        for i in self.displayed() {
+            if let Some(p) = self.store.raw(i) {
+                w.write_packet(&p)?;
+                n += 1;
+            }
+        }
+        w.flush()?;
+        Ok(n)
+    }
+
+    fn run_command(&mut self, cmd: &str) {
+        let cmd = cmd.trim();
+        if cmd == "q" {
+            self.quit = true;
+        } else if let Some(path) = cmd.strip_prefix("w ").map(str::trim) {
+            self.message = Some(match self.export(path) {
+                Ok(n) => format!("{n} paket yazıldı: {path}"),
+                Err(e) => format!("yazılamadı: {e}"),
+            });
+        } else if !cmd.is_empty() {
+            self.message = Some(format!("bilinmeyen komut: {cmd}"));
         }
     }
 
@@ -134,6 +195,13 @@ impl App {
     /// Kaynaktan en fazla `DRAIN_BATCH` paket çeker; değişiklik olduysa `true`.
     pub fn ingest(&mut self) -> bool {
         let mut changed = false;
+        if self.store.is_file() {
+            let first = self.store.is_empty();
+            changed |= self.store.index_more(INDEX_BATCH) > 0;
+            if first && !self.store.is_empty() {
+                self.selected = Some(0);
+            }
+        }
         if !self.paused {
             let n = self.pending.len().min(DRAIN_BATCH);
             let queued: Vec<RawPacket> = self.pending.drain(..n).collect();
@@ -331,9 +399,7 @@ impl App {
                         match inp.kind {
                             InputKind::Filter => self.filter_text = inp.text,
                             InputKind::Command => {
-                                if inp.text.trim() == "q" {
-                                    self.quit = true;
-                                }
+                                self.run_command(&inp.text);
                                 self.command_text = inp.text;
                             }
                         }

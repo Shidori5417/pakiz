@@ -884,6 +884,7 @@ dependencies = [
  "crossbeam-channel",
  "pakiz-capture",
  "pakiz-dissect",
+ "pakiz-storage",
  "pakiz-tui",
  "tokio",
 ]
@@ -927,7 +928,9 @@ name = "pakiz-tui"
 version = "0.1.0"
 dependencies = [
  "pakiz-dissect",
+ "pakiz-storage",
  "ratatui",
+ "signal-hook",
 ]
 
 [[package]]

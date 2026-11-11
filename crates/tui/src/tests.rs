@@ -177,3 +177,93 @@ fn protocol_colors() {
     assert_eq!(t.protocol_color("UDP", true), t.malformed);
     assert_eq!(t.protocol_color("ARP", false), t.arp);
 }
+
+fn tmp_path(ext: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static N: AtomicU32 = AtomicU32::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("pakiz-tui-{}-{n}.{ext}", std::process::id()))
+}
+
+fn write_file(n: u32, ext: &str) -> std::path::PathBuf {
+    let p = tmp_path(ext);
+    let mut w = pakiz_storage::create(&p, pakiz_storage::Format::from_path(&p)).unwrap();
+    for i in 0..n {
+        w.write_packet(&udp_packet(i)).unwrap();
+    }
+    w.flush().unwrap();
+    p
+}
+
+fn count_packets(p: &std::path::Path) -> usize {
+    let mut r = pakiz_storage::CaptureReader::open(p).unwrap();
+    let mut n = 0;
+    while r.next_packet().unwrap().is_some() {
+        n += 1;
+    }
+    n
+}
+
+#[test]
+fn file_source_indexes_incrementally_and_reads_lazily() {
+    let n = u32::try_from(INDEX_BATCH).unwrap() * 2 + 5;
+    let path = write_file(n, "pcap");
+    let file = pakiz_storage::IndexedFile::open(&path).unwrap();
+    let mut app = App::from_file(file, "dosya.pcap");
+    assert!(app.store.is_file());
+    assert_eq!(app.store.index_progress(), Some(0));
+    app.ingest();
+    assert_eq!(app.store.len(), INDEX_BATCH);
+    assert!(app.store.index_progress().is_some());
+    assert!(screen(&mut app, 120, 30).contains("indeksleniyor %"));
+    while app.ingest() {}
+    assert_eq!(app.store.len(), n as usize);
+    assert_eq!(app.store.index_progress(), None);
+    // Halka tampon sınırı yok; seçim başta kalır.
+    assert_eq!(app.store.evicted(), 0);
+    assert_eq!(app.selected, Some(0));
+    let s = screen(&mut app, 120, 30);
+    assert!(s.contains("dosya.pcap") && s.contains("10.0.0.1") && s.contains("UDP"));
+    // Yalnızca görünen satırlar ayrıştırıldı.
+    assert!(app.store.cached() > 0 && app.store.cached() < 64);
+    let e = app.store.get(n as usize - 1).unwrap();
+    assert_eq!(e.number, u64::from(n));
+    assert!((app.store.rel_time(&e) - f64::from(n - 1) * 0.01).abs() < 1e-6);
+    app.apply(Action::NextPanel);
+    assert_eq!(app.tree().unwrap().1.len(), 5);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn export_writes_displayed_packets() {
+    let mut app = app_with(7, 100);
+    assert_eq!(
+        app.displayed().collect::<Vec<_>>(),
+        (0..7).collect::<Vec<_>>()
+    );
+    let out = tmp_path("pcapng");
+    app.on_key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE));
+    for c in format!("w {}", out.display()).chars() {
+        app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app
+        .message
+        .as_deref()
+        .unwrap()
+        .starts_with("7 paket yazıldı"));
+    assert_eq!(count_packets(&out), 7);
+
+    // Dosya modunda (indeksleme bitmeden bile) tümü yazılır.
+    let src = write_file(u32::try_from(INDEX_BATCH).unwrap() + 3, "pcap");
+    let mut app = App::from_file(pakiz_storage::IndexedFile::open(&src).unwrap(), "f");
+    app.ingest();
+    assert_eq!(app.export(out.to_str().unwrap()).unwrap(), INDEX_BATCH + 3);
+    assert_eq!(count_packets(&out), INDEX_BATCH + 3);
+    app.on_key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE));
+    app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.message.as_deref().unwrap().contains("bilinmeyen"));
+    std::fs::remove_file(out).unwrap();
+    std::fs::remove_file(src).unwrap();
+}

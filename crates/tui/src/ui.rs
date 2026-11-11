@@ -22,7 +22,7 @@ const HELP: &[(&str, &str)] = &[
     ("p", "duraklat / devam"),
     ("a", "otomatik kaydırma"),
     ("/", "filtre (Aşama 5)"),
-    (":", "komut (:q çıkış)"),
+    (":", "komut (:q çıkış, :w dosya)"),
     ("?", "bu yardım"),
     ("q", "çıkış"),
     ("fare", "tıkla: seç, tekerlek: kaydır"),
@@ -105,7 +105,7 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
         Some(
             Row::new(vec![
                 Cell::from(e.number.to_string()),
-                Cell::from(format!("{:.6}", app.store.rel_time(e))),
+                Cell::from(format!("{:.6}", app.store.rel_time(&e))),
                 Cell::from(s.src.clone()),
                 Cell::from(s.dst.clone()),
                 Cell::from(s.protocol),
@@ -282,6 +282,21 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
                 .fg(app.theme.http)
                 .add_modifier(Modifier::BOLD),
         ));
+    }
+    if let Some(pct) = app.store.index_progress() {
+        parts.push(Span::styled(
+            format!("│ indeksleniyor %{pct} "),
+            Style::default().fg(app.theme.arp),
+        ));
+    }
+    if let Some(err) = app.store.error() {
+        parts.push(Span::styled(
+            format!("│ hata: {err} "),
+            Style::default().fg(app.theme.malformed),
+        ));
+    }
+    if let Some(msg) = &app.message {
+        parts.push(Span::raw(format!("│ {msg} ")));
     }
     if !app.filter_text.is_empty() {
         parts.push(Span::raw(format!("│ filtre: {} ", app.filter_text)));

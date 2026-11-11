@@ -265,3 +265,35 @@ fn indexed_truncated_file_keeps_partial() {
     assert_eq!(idx.len(), pkts.len() - 1);
     assert_eq!(idx.get(48).unwrap(), pkts[48]);
 }
+
+#[test]
+fn indexed_large_file_incremental() {
+    const N: u32 = 200_000;
+    let tmp = Tmp::new("pcap");
+    let mut w = create(&tmp.0, Format::Pcap).unwrap();
+    for i in 0..N {
+        let mut data = vec![0u8; 60];
+        data[..4].copy_from_slice(&i.to_be_bytes());
+        w.write_packet(&RawPacket {
+            ts: at(1_700_000_000, u64::from(i) * 1000),
+            orig_len: 60,
+            data,
+            ifindex: 0,
+        })
+        .unwrap();
+    }
+    w.flush().unwrap();
+    drop(w);
+    let mut f = IndexedFile::open(&tmp.0).unwrap();
+    let mut steps = 0;
+    while f.index_more(10_000).unwrap() > 0 {
+        steps += 1;
+        assert!(f.bytes_scanned() <= f.file_len());
+    }
+    assert!(f.is_complete());
+    assert_eq!(steps, 20);
+    assert_eq!(f.len(), N as usize);
+    for i in [0u32, 1, 99_999, N - 1] {
+        assert_eq!(f.get(i as usize).unwrap().data[..4], i.to_be_bytes());
+    }
+}
