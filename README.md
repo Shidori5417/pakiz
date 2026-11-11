@@ -30,12 +30,29 @@ yapılır. Arayüz ratatui ile çizilir.
 
 ## Kurulum
 
+**Seçenek A (önerilen): `cargo install`.** Binary `~/.cargo/bin/pakiz` olur ve
+dizinden bağımsız çalışır.
+
 ```sh
-cargo build --release
+cargo install --path crates/bin
 # Canlı yakalama için root yerine yetenek (capability) ver:
-sudo setcap cap_net_raw,cap_net_admin=eip target/release/pakiz
-./target/release/pakiz --help
+sudo setcap cap_net_raw,cap_net_admin=eip "$(command -v pakiz)"   # bash/zsh
+sudo setcap cap_net_raw,cap_net_admin=eip (command -v pakiz)      # fish
+pakiz -i enp6s0
 ```
+
+**Seçenek B: yerel derleme.** Komutlar proje kökünde çalıştırılmalıdır
+(`target/release/...` göreli bir yoldur); başka dizinden mutlak yol kullanın.
+
+```sh
+cd /proje/kökü
+cargo build --release
+sudo setcap cap_net_raw,cap_net_admin=eip target/release/pakiz
+./target/release/pakiz -i enp6s0
+```
+
+Not: Dosya değişince capability silinir; her yeniden derleme/kurulumdan sonra
+`setcap` komutunu tekrar verin.
 
 Rust stable (2021 edition) ile derlenir. Çalışma zamanında libpcap gerekmez.
 `cap_net_raw` soket açmak için, `cap_net_admin` promiscuous mod için gereklidir.
