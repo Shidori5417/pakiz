@@ -332,6 +332,16 @@ mod tests {
             "tcp.flags.syn",
             "udp.port",
             "data.len",
+            "dns.qry.name",
+            "dns.a",
+            "mdns",
+            "dhcp.option.dhcp",
+            "http.request.method",
+            "tls.handshake.extensions_server_name",
+            "quic.dcid",
+            "ssh.kex_algorithms",
+            "mqtt.topic",
+            "ntp.flags.mode",
         ] {
             assert!(names.contains(&want), "{want} yok");
         }

@@ -1031,6 +1031,9 @@ dependencies = [
 [[package]]
 name = "pakiz-dissect"
 version = "0.1.0"
+dependencies = [
+ "criterion",
+]
 
 [[package]]
 name = "pakiz-filter"
