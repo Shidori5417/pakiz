@@ -173,6 +173,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797"
 
 [[package]]
+name = "bytes"
+version = "1.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
+
+[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -898,6 +904,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "netlink-sys"
+version = "0.8.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd6c30ed10fa69cc491d491b85cc971f6bdeb8e7367b7cde2ee6cc878d583fae"
+dependencies = [
+ "bytes",
+ "libc",
+ "log",
+]
+
+[[package]]
 name = "nix"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1048,10 +1065,20 @@ dependencies = [
 [[package]]
 name = "pakiz-flow"
 version = "0.1.0"
+dependencies = [
+ "criterion",
+ "pakiz-dissect",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "pakiz-stats"
 version = "0.1.0"
+dependencies = [
+ "netlink-sys",
+ "pakiz-dissect",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "pakiz-storage"

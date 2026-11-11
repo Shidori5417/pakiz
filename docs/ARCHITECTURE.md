@@ -11,7 +11,7 @@ Terminalde çalışan, Linux'a özel, Wireshark benzeri paket analiz aracı. Bin
 | storage  | pcap + pcapng okuma/yazma, büyük dosya için ofset indeksi (paketi gerektiğinde oku). | dissect |
 | filter   | display filter: elle lexer, Pratt parser, AST, paket başı değerlendirici; alan adları registry'den. Klasik BPF derleyicisi (`-f` yakalama filtresi için basit ifadeler) de burada. | dissect |
 | flow     | TCP 5-tuple akış takibi, sıra no ile yeniden birleştirme, retransmission/dup-ack/zero-window/RST analizi, UDP conversation. | dissect |
-| stats    | pps/bps zaman serisi, protokol dağılımı, top talker, conversation/port tabloları, süreç eşleme (sock_diag netlink → /proc fallback), DNS ad önbelleği. | dissect, flow |
+| stats    | pps/bps zaman serisi, protokol dağılımı, top talker, conversation/port tabloları, süreç eşleme (sock_diag netlink → /proc fallback), DNS ad önbelleği. | dissect |
 | tui      | ratatui + crossterm: 3 panel, ek görünümler, vim tuşları, fare, tema, sanal kaydırma, ~30 fps, halka tampon. | hepsi |
 | bin      | `pakiz` binary: clap CLI, config (`~/.config/pakiz/config.toml`), tokio runtime, `--no-tui` satır çıktısı, anyhow. | hepsi |
 

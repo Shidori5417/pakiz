@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+pakiz-dissect.workspace = true
+thiserror.workspace = true
+netlink-sys = { version = "0.8", default-features = false }
 
 [lints]
 workspace = true
