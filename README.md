@@ -310,3 +310,7 @@ cargo bench --workspace --no-run
 cd crates/dissect && cargo +nightly fuzz run dissect_frame
 cd crates/filter  && cargo +nightly fuzz run filter_parse
 ```
+
+## Lisans
+
+[MIT](LICENSE)
