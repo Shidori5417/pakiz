@@ -7,6 +7,9 @@
 # default_interface = "eth0"
 # Bellekte tutulacak en fazla paket (canlı yakalama; eskiler düşer).
 max_packets = 100000
+# Tüm TCP/UDP akış birleştirme tamponları için toplam bellek bütçesi (MiB).
+# Aşılırsa en eski akışların birleştirme verisi düşer (akışlar korunur).
+max_flow_memory_mb = 256
 # Saniyedeki en fazla çizim (1..=240).
 fps = 30
 # IP yerine DNS cevaplarından öğrenilen adları göster (TUI'de `n`).

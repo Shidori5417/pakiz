@@ -8,6 +8,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
+use pakiz_flow::FlowTable;
 use pakiz_tui::{
     catalog, format_color, format_key, parse_color, parse_key, Action, ColorRule, IconSet, Key,
     Keymap, PacketStore, Theme,
@@ -33,6 +34,8 @@ pub struct General {
     pub default_interface: Option<String>,
     /// Bellekte tutulacak en fazla paket (halka tampon).
     pub max_packets: usize,
+    /// Tüm TCP/UDP akış birleştirme tamponları için toplam MiB bütçesi.
+    pub max_flow_memory_mb: usize,
     /// Saniyedeki en fazla çizim.
     pub fps: u32,
     /// Kaynak/Hedef yerine DNS adları.
@@ -48,6 +51,7 @@ impl Default for General {
         Self {
             default_interface: None,
             max_packets: PacketStore::DEFAULT_MAX,
+            max_flow_memory_mb: FlowTable::DEFAULT_TOTAL_BUFFER >> 20,
             fps: 30,
             resolve_names: false,
             autoscroll: true,
@@ -204,6 +208,9 @@ pub fn parse(text: &str, name: &str, theme_override: Option<&str>) -> Result<Set
     }
     if g.max_packets == 0 {
         return Err(anyhow!("{name}: general.max_packets en az 1 olmalı"));
+    }
+    if g.max_flow_memory_mb == 0 {
+        return Err(anyhow!("{name}: general.max_flow_memory_mb en az 1 olmalı"));
     }
 
     let icons = IconSet::from_name(&g.icons).ok_or_else(|| {
@@ -372,6 +379,9 @@ pub fn dump() -> String {
          # default_interface = \"eth0\"\n\
          # Bellekte tutulacak en fazla paket (canlı yakalama; eskiler düşer).\n\
          max_packets = {}\n\
+         # Tüm TCP/UDP akış birleştirme tamponları için toplam bellek bütçesi (MiB).\n\
+         # Aşılırsa en eski akışların birleştirme verisi düşer (akışlar korunur).\n\
+         max_flow_memory_mb = {}\n\
          # Saniyedeki en fazla çizim (1..=240).\n\
          fps = {}\n\
          # IP yerine DNS cevaplarından öğrenilen adları göster (TUI'de `n`).\n\
@@ -386,6 +396,7 @@ pub fn dump() -> String {
          # Renk: \"#rrggbb\", ad (red, green, darkgray, reset...) veya 256 renk indeksi.\n\
          name = \"dark\"",
         g.max_packets,
+        g.max_flow_memory_mb,
         g.fps,
         g.resolve_names,
         g.autoscroll,

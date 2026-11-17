@@ -246,6 +246,7 @@ impl LineOut {
         // Satır modunda Follow verisi gerekmez: birleştirme tamponu küçük tutulur.
         let flows = FlowTable::with_config(pakiz_flow::Config {
             max_buffer: 64 << 10,
+            max_total_buffer: 64 << 20,
             gap_threshold: 64 << 10,
             ..pakiz_flow::Config::default()
         })?;
@@ -282,7 +283,7 @@ impl LineOut {
             } else {
                 (s.src.as_str(), s.dst.as_str())
             };
-            let tag = a.flow.map(|t| t.flags.info_prefix()).unwrap_or_default();
+            let tag = a.flow.map_or_default(|t| t.flags.info_prefix());
             let proc = if self.an.processes_enabled() {
                 format!(" [{}]", a.process.as_deref().unwrap_or("-"))
             } else {
@@ -636,6 +637,11 @@ fn apply_settings(
     app.set_theme(settings.theme, settings.coloring)
         .map_err(|e| anyhow::anyhow!("yerleşik renklendirme kuralı derlenemedi: {}", e.msg))?;
     app.resolve_names = cli.resolve;
+    app.analyzer.flows = FlowTable::with_config(pakiz_flow::Config {
+        max_total_buffer: settings.general.max_flow_memory_mb.saturating_mul(1 << 20),
+        ..pakiz_flow::Config::default()
+    })
+    .map_err(|e| anyhow::anyhow!("akış bellek bütçesi: {e}"))?;
     tui.set_fps(settings.general.fps);
     set_initial_filter(app, cli)
 }
