@@ -430,8 +430,7 @@ fn scan_proc_fds() -> HashMap<u64, ProcessInfo> {
             };
             let n = name.get_or_insert_with(|| {
                 fs::read_to_string(ent.path().join("comm"))
-                    .map(|s| s.trim_end().to_owned())
-                    .unwrap_or_default()
+                    .map_or_default(|s| s.trim_end().to_owned())
             });
             map.entry(inode).or_insert_with(|| ProcessInfo {
                 pid,

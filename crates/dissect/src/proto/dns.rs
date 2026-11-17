@@ -447,7 +447,7 @@ impl Msg<'_> {
                         r.ipv6(0).filter(|_| rdata.len() == 16).map(V::Ipv6),
                     )
                 };
-                let s = v.as_ref().map(ToString::to_string).unwrap_or_default();
+                let s = v.as_ref().map_or_default(ToString::to_string);
                 f.push(Field::opt(name, title, v, r.abs(0), rdata.len()));
                 s
             }
