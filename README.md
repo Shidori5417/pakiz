@@ -3,6 +3,7 @@
 Linux için terminalde çalışan, libpcap'siz, Wireshark benzeri paket analizörü.
 
 [![CI](https://github.com/Shidori5417/pakiz/actions/workflows/ci.yml/badge.svg)](https://github.com/Shidori5417/pakiz/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Rust](https://img.shields.io/badge/Rust-1.98%2B%20(2021)-orange?logo=rust)
 ![Linux](https://img.shields.io/badge/platform-Linux-blue?logo=linux&logoColor=white)
 
