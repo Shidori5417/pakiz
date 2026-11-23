@@ -3,7 +3,7 @@
 Linux için terminalde çalışan, libpcap'siz, Wireshark benzeri paket analizörü.
 
 [![CI](https://github.com/Shidori5417/pakiz/actions/workflows/ci.yml/badge.svg)](https://github.com/Shidori5417/pakiz/actions/workflows/ci.yml)
-![Rust](https://img.shields.io/badge/Rust-stable%202021-orange?logo=rust)
+![Rust](https://img.shields.io/badge/Rust-1.98%2B%20(2021)-orange?logo=rust)
 ![Linux](https://img.shields.io/badge/platform-Linux-blue?logo=linux&logoColor=white)
 
 ![pakiz ana ekran: paket listesi, katman ağacı ve hex görünümü](docs/img/main.svg)
@@ -65,7 +65,7 @@ Görseller örnek bir loopback yakalamasından (DNS + HTTP) gerçek TUI çıktı
 
 ## Kurulum
 
-Rust stable (2021 edition) gerekir. `cap_net_raw` soket açmak, `cap_net_admin`
+Rust 1.98 veya üstü (2021 edition) gerekir; en düşük desteklenen sürüm (MSRV) `Cargo.toml` içinde `rust-version = "1.98"` olarak tanımlıdır (`Option::map_or_default` bu sürümde kararlı hale gelir) ve CI'da ayrıca denenir. `cap_net_raw` soket açmak, `cap_net_admin`
 promiscuous mod için gereklidir; yetki yoksa program çalıştırılacak komutu söyler.
 
 **Seçenek A (önerilen): `cargo install`.** Binary `~/.cargo/bin/pakiz` olur ve
