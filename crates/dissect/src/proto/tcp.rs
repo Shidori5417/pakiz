@@ -311,16 +311,14 @@ impl Dissector for Tcp {
         }
         l.push(hf);
         let fl = r.be_u16(12).map(|v| v & 0x0fff);
-        let set: Vec<&str> = fl
-            .map(|f| {
-                FLAGS
-                    .iter()
-                    .rev()
-                    .filter(|x| f & x.0 != 0)
-                    .map(|x| x.2)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let set: Vec<&str> = fl.map_or_default(|f| {
+            FLAGS
+                .iter()
+                .rev()
+                .filter(|x| f & x.0 != 0)
+                .map(|x| x.2)
+                .collect()
+        });
         let mut ff = Field::opt("tcp.flags", "Flags", fl.map(V::U16), r.abs(12), 2);
         if let Some(f) = fl {
             let mut kids = vec![Field::opt(

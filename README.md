@@ -3,7 +3,7 @@
 Linux için terminalde çalışan, libpcap'siz, Wireshark benzeri paket analizörü.
 
 [![CI](https://github.com/Shidori5417/pakiz/actions/workflows/ci.yml/badge.svg)](https://github.com/Shidori5417/pakiz/actions/workflows/ci.yml)
-![Rust](https://img.shields.io/badge/Rust-stable%202021-orange?logo=rust)
+![Rust](https://img.shields.io/badge/Rust-1.98%2B%20(2021)-orange?logo=rust)
 ![Linux](https://img.shields.io/badge/platform-Linux-blue?logo=linux&logoColor=white)
 
 ![pakiz ana ekran: paket listesi, katman ağacı ve hex görünümü](docs/img/main.svg)
@@ -65,14 +65,18 @@ Görseller örnek bir loopback yakalamasından (DNS + HTTP) gerçek TUI çıktı
 
 ## Kurulum
 
-Rust stable (2021 edition) gerekir. `cap_net_raw` soket açmak, `cap_net_admin`
+Rust 1.98 veya üstü (2021 edition) gerekir; en düşük desteklenen sürüm (MSRV) `Cargo.toml` içinde `rust-version = "1.98"` olarak tanımlıdır (`Option::map_or_default` bu sürümde kararlı hale gelir) ve CI'da ayrıca denenir. `cap_net_raw` soket açmak, `cap_net_admin`
 promiscuous mod için gereklidir; yetki yoksa program çalıştırılacak komutu söyler.
 
 **Seçenek A (önerilen): `cargo install`.** Binary `~/.cargo/bin/pakiz` olur ve
 dizinden bağımsız çalışır.
 
 ```sh
+git clone https://github.com/Shidori5417/pakiz.git
+cd pakiz
 cargo install --path crates/bin
+# veya depoyu klonlamadan:
+# cargo install --git https://github.com/Shidori5417/pakiz pakiz-bin
 # Canlı yakalama için root yerine yetenek (capability) ver:
 sudo setcap cap_net_raw,cap_net_admin=eip "$(command -v pakiz)"   # bash/zsh
 sudo setcap cap_net_raw,cap_net_admin=eip (command -v pakiz)      # fish
@@ -112,6 +116,7 @@ pakiz -r a.pcap --stats                 # protokol dağılımı + top talkers
 pakiz -i eth0 --count                   # her saniye toplam paket/bayt/düşen sayacı
 pakiz --list-interfaces
 pakiz --theme ocean                     # yerleşik tema (dark, light, ocean, forest)
+mkdir -p ~/.config/pakiz
 pakiz --dump-config > ~/.config/pakiz/config.toml
 ```
 

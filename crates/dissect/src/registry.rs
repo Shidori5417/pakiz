@@ -228,7 +228,7 @@ fn frame_layer(pkt: &RawPacket, number: Option<u64>, cap_len: u32) -> Layer {
         "frame",
         format!(
             "Frame{}: {} bytes on wire, {cap_len} bytes captured",
-            number.map(|n| format!(" {n}")).unwrap_or_default(),
+            number.map_or_default(|n| format!(" {n}")),
             pkt.orig_len
         ),
         0,

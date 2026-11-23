@@ -217,15 +217,12 @@ impl Dissector for Ipv4 {
                 r.abs(1),
                 1,
             )
-            .with_children(
-                ds.map(|d| {
-                    vec![
-                        Field::opt("ip.dsfield.dscp", "DSCP", Some(V::U8(d >> 2)), r.abs(1), 1),
-                        Field::opt("ip.dsfield.ecn", "ECN", Some(V::U8(d & 3)), r.abs(1), 1),
-                    ]
-                })
-                .unwrap_or_default(),
-            ),
+            .with_children(ds.map_or_default(|d| {
+                vec![
+                    Field::opt("ip.dsfield.dscp", "DSCP", Some(V::U8(d >> 2)), r.abs(1), 1),
+                    Field::opt("ip.dsfield.ecn", "ECN", Some(V::U8(d & 3)), r.abs(1), 1),
+                ]
+            })),
         );
         let tot = r.be_u16(2).map(usize::from);
         let mut lf = Field::opt(
