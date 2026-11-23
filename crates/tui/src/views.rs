@@ -457,8 +457,7 @@ fn chunk_line(c: &Chunk<'_>, mode: FollowMode, width: usize, base: u64, line: us
     match mode {
         FollowMode::Ascii => ascii_lines(c.data, width)
             .nth(line)
-            .map(|r| ascii_text(c.data.get(r).unwrap_or_default()))
-            .unwrap_or_default(),
+            .map_or_default(|r| ascii_text(c.data.get(r).unwrap_or_default())),
         FollowMode::Hex => {
             let s = line * 16;
             let e = (s + 16).min(c.data.len());

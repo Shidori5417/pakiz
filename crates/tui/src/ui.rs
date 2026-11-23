@@ -234,7 +234,7 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     let rows = (app.list_offset..end).filter_map(|i| {
         let e = app.store.get(app.store_index(i)?)?;
         let s = &e.summary;
-        let flags = e.flow.map(|t| t.flags).unwrap_or_default();
+        let flags = e.flow.map_or_default(|t| t.flags);
         let selected = Some(i) == app.selected;
         let mut style = if e.malformed {
             Style::default().fg(theme.malformed)
@@ -349,8 +349,7 @@ fn draw_tree(f: &mut Frame, app: &mut App, area: Rect) {
             let range = rows
                 .get(sel)
                 .filter(|r| r.len > 0)
-                .map(|r| format!(" · bayt {}..{}", r.offset, r.offset + r.len))
-                .unwrap_or_default();
+                .map_or_default(|r| format!(" · bayt {}..{}", r.offset, r.offset + r.len));
             let title = format!(
                 " {}Katmanlar {}/{}{range} ",
                 icons.title_tree(),
@@ -526,20 +525,17 @@ fn draw_hex(f: &mut Frame, app: &mut App, area: Rect) {
         .map(|l| hex_line(data, l, hl.as_ref(), &theme))
         .collect();
     let width = usize::from(area.width);
-    let field = row
-        .filter(|r| r.len > 0)
-        .map(|r| {
-            let mut name: String = r
-                .label
-                .chars()
-                .take(width.saturating_sub(24).clamp(8, 48))
-                .collect();
-            if name.chars().count() < r.label.chars().count() {
-                name.push_str(icons.ellipsis());
-            }
-            format!(" · {name}")
-        })
-        .unwrap_or_default();
+    let field = row.filter(|r| r.len > 0).map_or_default(|r| {
+        let mut name: String = r
+            .label
+            .chars()
+            .take(width.saturating_sub(24).clamp(8, 48))
+            .collect();
+        if name.chars().count() < r.label.chars().count() {
+            name.push_str(icons.ellipsis());
+        }
+        format!(" · {name}")
+    });
     let title = format!(" {}Hex{field} · {} bayt ", icons.title_hex(), data.len());
     app.hex_offset = offset;
     app.last_hl = hl_start;

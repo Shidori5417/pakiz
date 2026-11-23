@@ -282,7 +282,7 @@ impl LineOut {
             } else {
                 (s.src.as_str(), s.dst.as_str())
             };
-            let tag = a.flow.map(|t| t.flags.info_prefix()).unwrap_or_default();
+            let tag = a.flow.map_or_default(|t| t.flags.info_prefix());
             let proc = if self.an.processes_enabled() {
                 format!(" [{}]", a.process.as_deref().unwrap_or("-"))
             } else {

@@ -72,7 +72,11 @@ promiscuous mod için gereklidir; yetki yoksa program çalıştırılacak komutu
 dizinden bağımsız çalışır.
 
 ```sh
+git clone https://github.com/Shidori5417/pakiz.git
+cd pakiz
 cargo install --path crates/bin
+# veya depoyu klonlamadan:
+# cargo install --git https://github.com/Shidori5417/pakiz pakiz-bin
 # Canlı yakalama için root yerine yetenek (capability) ver:
 sudo setcap cap_net_raw,cap_net_admin=eip "$(command -v pakiz)"   # bash/zsh
 sudo setcap cap_net_raw,cap_net_admin=eip (command -v pakiz)      # fish
@@ -112,6 +116,7 @@ pakiz -r a.pcap --stats                 # protokol dağılımı + top talkers
 pakiz -i eth0 --count                   # her saniye toplam paket/bayt/düşen sayacı
 pakiz --list-interfaces
 pakiz --theme ocean                     # yerleşik tema (dark, light, ocean, forest)
+mkdir -p ~/.config/pakiz
 pakiz --dump-config > ~/.config/pakiz/config.toml
 ```
 
