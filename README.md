@@ -223,6 +223,7 @@ aynıdır).
 [general]
 default_interface = "wlan0"
 max_packets = 200000
+max_flow_memory_mb = 256  # tüm akış birleştirme tamponları için toplam bütçe
 fps = 30
 resolve_names = true
 autoscroll = true

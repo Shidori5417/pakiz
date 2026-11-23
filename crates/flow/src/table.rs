@@ -24,6 +24,9 @@ pub struct Config {
     pub idle_timeout: Option<Duration>,
     /// Yön başına bellekte tutulan en fazla birleşik veri.
     pub max_buffer: usize,
+    /// Tüm akışların birleştirme tamponları için toplam bayt bütçesi.
+    /// Aşıldığında en eski (LRU) akışların verisi atılır; akış kayıtları korunur.
+    pub max_total_buffer: usize,
     /// Boşluğun ötesinde bu kadar bayt beklerse boşluk kayıp sayılır.
     pub gap_threshold: usize,
     /// Boşluk dolduran segment, yöndeki en yüksek segmentten bu süre içinde
@@ -37,6 +40,7 @@ impl Default for Config {
             max_flows: 100_000,
             idle_timeout: Some(Duration::from_secs(600)),
             max_buffer: 4 << 20,
+            max_total_buffer: FlowTable::DEFAULT_TOTAL_BUFFER,
             gap_threshold: 256 << 10,
             ooo_threshold: Duration::from_millis(3),
         }
@@ -183,6 +187,15 @@ struct Flow {
     stream: Stream,
 }
 
+impl Flow {
+    /// Birleştiricilerde sıra dışı bekleyen toplam bayt.
+    fn pending_total(&self) -> usize {
+        self.tcp.as_ref().map_or(0, |t| {
+            t.reasm[0].pending_bytes() + t.reasm[1].pending_bytes()
+        })
+    }
+}
+
 struct Seg<'a> {
     proto: Proto,
     src: SocketAddr,
@@ -220,6 +233,8 @@ pub struct FlowTable {
     tick: u64,
     next_index: [u32; 2],
     evicted: u64,
+    /// Tüm akışların birleştirme tamponlarındaki toplam bayt.
+    buffered: usize,
 }
 
 impl Default for FlowTable {
@@ -229,19 +244,26 @@ impl Default for FlowTable {
 }
 
 impl FlowTable {
+    /// Varsayılan toplam birleştirme tamponu bütçesi (256 MiB).
+    pub const DEFAULT_TOTAL_BUFFER: usize = 256 << 20;
+
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// # Errors
-    /// Sıfır `max_flows`/`max_buffer` veya `gap_threshold > max_buffer`.
+    /// Sıfır `max_flows`/`max_buffer`/`max_total_buffer` veya
+    /// `gap_threshold > max_buffer`.
     pub fn with_config(cfg: Config) -> Result<Self, FlowError> {
         if cfg.max_flows == 0 {
             return Err(FlowError::InvalidConfig("max_flows 0 olamaz"));
         }
         if cfg.max_buffer == 0 {
             return Err(FlowError::InvalidConfig("max_buffer 0 olamaz"));
+        }
+        if cfg.max_total_buffer == 0 {
+            return Err(FlowError::InvalidConfig("max_total_buffer 0 olamaz"));
         }
         if cfg.gap_threshold > cfg.max_buffer {
             return Err(FlowError::InvalidConfig(
@@ -260,6 +282,7 @@ impl FlowTable {
             tick: 0,
             next_index: [0; 2],
             evicted: 0,
+            buffered: 0,
         }
     }
 
@@ -310,8 +333,54 @@ impl FlowTable {
 
     /// Yakalama sonu: tüm TCP birleştiricilerdeki boşlukları atlayıp teslim eder.
     pub fn flush_all(&mut self) {
+        let mut added = 0;
+        let mut pending_freed = 0;
         for f in self.flows.values_mut() {
-            flush_flow(f);
+            let before = f.pending_total();
+            added += flush_flow(f);
+            pending_freed += before - f.pending_total();
+        }
+        self.buffered = self.buffered.saturating_sub(pending_freed) + added;
+        self.enforce_budget();
+    }
+
+    /// Toplam birleştirme tamponundaki bayt (teşhis/testler için).
+    #[must_use]
+    pub fn buffered_bytes(&self) -> usize {
+        self.buffered
+    }
+
+    /// Toplam bütçe aşıldıysa en eski akışların verisini atar. Akışların
+    /// kimliği/istatistikleri korunur; yalnızca birleştirilmiş baytlar küçülür.
+    fn enforce_budget(&mut self) {
+        if self.buffered <= self.cfg.max_total_buffer {
+            return;
+        }
+        let cap = self.cfg.max_total_buffer;
+        for &id in self.lru.values() {
+            if self.buffered <= cap {
+                break;
+            }
+            let Some(f) = self.flows.get_mut(&id) else {
+                continue;
+            };
+            // Sıra dışı bekleyen veri de bütçeye dahildir: önce onu teslim edip
+            // serbest bırak, sonra birleşik tamponu bütçeye göre küçült.
+            let pending = f.pending_total();
+            if pending > 0 {
+                let added = flush_flow(f);
+                self.buffered = self.buffered.saturating_sub(pending) + added;
+                if self.buffered <= cap {
+                    break;
+                }
+            }
+            let stored = f.stream.stored_total();
+            if stored == 0 {
+                continue;
+            }
+            let keep = stored.saturating_sub(self.buffered - cap);
+            let dropped = f.stream.trim_to(keep);
+            self.buffered = self.buffered.saturating_sub(dropped);
         }
     }
 
@@ -350,17 +419,25 @@ impl FlowTable {
             flow.first = pkt.ts;
         }
 
-        let tcp = if let (Some(t), Some(ts)) = (&mut flow.tcp, seg.tcp) {
+        let pending_before = flow.pending_total();
+        let (tcp, added) = if let (Some(t), Some(ts)) = (&mut flow.tcp, seg.tcp) {
             let (info, out) = analyze(t, dir, &ts, seg.payload, pkt_no, pkt.ts, cfg_ooo);
-            deliver(&mut flow.stream, dir, out, pkt_no);
+            let mut added = deliver(&mut flow.stream, dir, out, pkt_no);
             if matches!(t.state, TcpState::Closed | TcpState::Reset) {
-                flush_flow(flow);
+                added += flush_flow(flow);
             }
-            Some(info)
+            (Some(info), added)
         } else {
-            flow.stream.push_data(dir, seg.payload, pkt_no, false);
-            None
+            (None, flow.stream.push_data(dir, seg.payload, pkt_no, false))
         };
+        self.buffered += added;
+        let pending_after = self.flows.get(&id).map_or(0, Flow::pending_total);
+        if pending_after >= pending_before {
+            self.buffered += pending_after - pending_before;
+        } else {
+            self.buffered = self.buffered.saturating_sub(pending_before - pending_after);
+        }
+        self.enforce_budget();
         Some(PacketAnalysis {
             stream: id,
             key,
@@ -429,6 +506,9 @@ impl FlowTable {
 
     fn remove(&mut self, id: StreamId) {
         if let Some(f) = self.flows.remove(&id) {
+            self.buffered = self
+                .buffered
+                .saturating_sub(f.stream.stored_total() + f.pending_total());
             self.lru.remove(&f.lru);
             if self.by_key.get(&f.key) == Some(&id) {
                 self.by_key.remove(&f.key);
@@ -475,17 +555,22 @@ fn conversation_of(id: StreamId, f: &Flow) -> Conversation {
     }
 }
 
-fn deliver(stream: &mut Stream, dir: Dir, out: Vec<Delivery>, pkt_no: u64) {
+fn deliver(stream: &mut Stream, dir: Dir, out: Vec<Delivery>, pkt_no: u64) -> usize {
+    let mut added = 0;
     for d in out {
         match d {
-            Delivery::Data { data, pkt } => stream.push_data(dir, &data, pkt, true),
+            Delivery::Data { data, pkt } => added += stream.push_data(dir, &data, pkt, true),
             Delivery::Lost(n) => stream.push_lost(dir, n, pkt_no),
         }
     }
+    added
 }
 
-fn flush_flow(f: &mut Flow) {
-    let Some(t) = f.tcp.as_mut() else { return };
+fn flush_flow(f: &mut Flow) -> usize {
+    let Some(t) = f.tcp.as_mut() else {
+        return 0;
+    };
+    let mut added = 0;
     for dir in [Dir::Client, Dir::Server] {
         let mut out = Vec::new();
         t.reasm[dir.index()].flush(&mut out);
@@ -496,8 +581,9 @@ fn flush_flow(f: &mut Flow) {
                 Delivery::Lost(_) => None,
             })
             .unwrap_or(0);
-        deliver(&mut f.stream, dir, out, pkt);
+        added += deliver(&mut f.stream, dir, out, pkt);
     }
+    added
 }
 
 /// Tek TCP segmentini analiz eder ve birleştiriciye verir.

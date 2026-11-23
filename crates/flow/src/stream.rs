@@ -115,11 +115,20 @@ impl Stream {
         self.stored[dir.index()]
     }
 
-    /// Veri ekler; `merge` ise son parça aynı yöndeyse ona eklenir.
-    pub(crate) fn push_data(&mut self, dir: Dir, data: &[u8], pkt: u64, merge: bool) {
+    /// İki yönde bellekte tutulan toplam veri baytı.
+    #[must_use]
+    pub fn stored_total(&self) -> usize {
+        self.stored[0] + self.stored[1]
+    }
+
+    /// Veri ekler; `merge` ise son parça aynı yöndeyse ona eklenir. Dönen değer
+    /// yön sınırı uygulandıktan sonra net eklenen bayt sayısıdır.
+    pub(crate) fn push_data(&mut self, dir: Dir, data: &[u8], pkt: u64, merge: bool) -> usize {
         if data.is_empty() {
-            return;
+            return 0;
         }
+        let di = dir.index();
+        let before = self.stored[di];
         match self.chunks.back_mut() {
             Some(c) if merge && c.dir == dir && c.marker.is_none() => {
                 c.data.extend_from_slice(data);
@@ -131,8 +140,9 @@ impl Stream {
                 marker: None,
             }),
         }
-        self.stored[dir.index()] += data.len();
+        self.stored[di] += data.len();
         self.enforce(dir);
+        self.stored[di] - before
     }
 
     pub(crate) fn push_lost(&mut self, dir: Dir, n: u64, pkt: u64) {
@@ -159,48 +169,81 @@ impl Stream {
     fn enforce(&mut self, dir: Dir) {
         let di = dir.index();
         while self.stored[di] > self.max_buffer {
-            let Some(i) = self
+            let excess = self.stored[di] - self.max_buffer;
+            if self.drop_from(dir, excess) == 0 {
+                break;
+            }
+        }
+    }
+
+    /// Toplam bütçeyi `keep` bayta indirir; en eski veriden başlar. Dönen değer
+    /// atılan bayt sayısıdır.
+    pub(crate) fn trim_to(&mut self, keep: usize) -> usize {
+        let mut dropped = 0;
+        while self.stored_total() > keep {
+            let Some(dir) = self
                 .chunks
                 .iter()
-                .position(|c| c.dir == dir && c.marker.is_none())
+                .find(|c| !c.data.is_empty())
+                .map(|c| c.dir)
             else {
                 break;
             };
-            let excess = self.stored[di] - self.max_buffer;
-            let Some(c) = self.chunks.get_mut(i) else {
+            let excess = self.stored_total() - keep;
+            let n = self.drop_from(dir, excess);
+            if n == 0 {
                 break;
-            };
-            let take = excess.min(c.data.len());
-            c.data.drain(..take);
-            let pkt = c.first_pkt;
-            let empty = c.data.is_empty();
-            self.stored[di] -= take;
-            let n = crate::u64_of(take);
-            self.dropped[di] += n;
-            if empty {
-                self.chunks.remove(i);
             }
-            let merged = i
-                .checked_sub(1)
-                .and_then(|p| self.chunks.get_mut(p))
-                .and_then(|p| match (&mut p.marker, p.dir == dir) {
-                    (Some(Marker::Dropped(m)), true) => Some(m),
-                    _ => None,
-                })
-                .map(|m| *m += n)
-                .is_some();
-            if !merged {
-                self.chunks.insert(
-                    i,
-                    Stored {
-                        dir,
-                        data: Vec::new(),
-                        first_pkt: pkt,
-                        marker: Some(Marker::Dropped(n)),
-                    },
-                );
-            }
+            dropped += n;
         }
+        dropped
+    }
+
+    /// `dir` yönünün en eski verisinden en fazla `take` bayt atar; yerine
+    /// `Dropped` işareti koyar (önceki aynı yön işaretiyle birleştirir).
+    fn drop_from(&mut self, dir: Dir, take: usize) -> usize {
+        let di = dir.index();
+        let Some(i) = self
+            .chunks
+            .iter()
+            .position(|c| c.dir == dir && !c.data.is_empty())
+        else {
+            return 0;
+        };
+        let Some(c) = self.chunks.get_mut(i) else {
+            return 0;
+        };
+        let take = take.min(c.data.len());
+        c.data.drain(..take);
+        let pkt = c.first_pkt;
+        let empty = c.data.is_empty();
+        self.stored[di] -= take;
+        let n = crate::u64_of(take);
+        self.dropped[di] += n;
+        if empty {
+            self.chunks.remove(i);
+        }
+        let merged = i
+            .checked_sub(1)
+            .and_then(|p| self.chunks.get_mut(p))
+            .and_then(|p| match (&mut p.marker, p.dir == dir) {
+                (Some(Marker::Dropped(m)), true) => Some(m),
+                _ => None,
+            })
+            .map(|m| *m += n)
+            .is_some();
+        if !merged {
+            self.chunks.insert(
+                i,
+                Stored {
+                    dir,
+                    data: Vec::new(),
+                    first_pkt: pkt,
+                    marker: Some(Marker::Dropped(n)),
+                },
+            );
+        }
+        take
     }
 }
 

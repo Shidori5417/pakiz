@@ -519,6 +519,64 @@ fn memory_limit_per_direction() {
 }
 
 #[test]
+fn global_buffer_budget_is_enforced() {
+    let cfg = Config {
+        max_buffer: 100,
+        max_total_buffer: 20,
+        gap_threshold: 10,
+        ..Config::default()
+    };
+    let mut cap = Cap::with(FlowTable::with_config(cfg).unwrap());
+    let a = sa("10.0.0.1:1");
+    let b = sa("10.0.0.2:1");
+    let peer = sa("10.0.0.9:9");
+    for _ in 0..10 {
+        cap.udp(a, peer, b"aaaaaaaa");
+        cap.udp(b, peer, b"bbbbbbbb");
+        assert!(
+            cap.table.buffered_bytes() <= 20,
+            "toplam {} bayt",
+            cap.table.buffered_bytes()
+        );
+    }
+    // Akışlar silinmez; yalnızca eski birleştirme verisi düşer.
+    assert_eq!(cap.table.len(), 2);
+    assert!(cap
+        .table
+        .stream(StreamId {
+            proto: Proto::Udp,
+            index: 0
+        })
+        .is_some());
+    assert!(cap
+        .table
+        .stream(StreamId {
+            proto: Proto::Udp,
+            index: 1
+        })
+        .is_some());
+}
+
+#[test]
+fn pending_reassembly_counts_towards_budget() {
+    let cfg = Config {
+        max_buffer: 1 << 20,
+        max_total_buffer: 10,
+        gap_threshold: 1000,
+        ..Config::default()
+    };
+    let mut cap = Cap::with(FlowTable::with_config(cfg).unwrap());
+    handshake(&mut cap, c(), s(), CISN, SISN);
+    // Sıra dışı 50 bayt: gap_threshold altında kalır ama toplam bütçeyi aşar.
+    cap.tcp(c(), s(), &Tcp::new(CISN + 101, SISN + 1, ACK, &[b'x'; 50]));
+    assert!(
+        cap.table.buffered_bytes() <= 10,
+        "bekleyen birleştirme verisi bütçeye dahil: {}",
+        cap.table.buffered_bytes()
+    );
+}
+
+#[test]
 fn lru_eviction() {
     let cfg = Config {
         max_flows: 2,
