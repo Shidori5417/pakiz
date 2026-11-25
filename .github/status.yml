@@ -1,0 +1,7 @@
+# Read by github.com/Shidori5417 (profile README) and the portfolio site.
+# Edit when the project's state changes; no need to touch it otherwise.
+# status: active | prototype | released | maintenance | paused | archived
+status: active
+focus:
+  en: "Memory budget for stream reassembly and a refreshed TUI (themes, command palette)."
+  tr: "Akış birleştirme için bellek bütçesi ve yenilenen TUI (temalar, komut paleti)."
