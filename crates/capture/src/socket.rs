@@ -436,10 +436,21 @@ pub(crate) fn parse_block(
     let hdr_len = size_of::<H>();
     let sll_off = (hdr_len + libc::TPACKET_ALIGNMENT - 1) & !(libc::TPACKET_ALIGNMENT - 1);
     for _ in 0..num {
-        let Some(sll) = block.get(off + sll_off..off + sll_off + size_of::<L>()) else {
+        let Some(sll_start) = off.checked_add(sll_off) else {
             return;
         };
-        let h = &block[off..off + hdr_len];
+        let Some(sll_end) = sll_start.checked_add(size_of::<L>()) else {
+            return;
+        };
+        let Some(sll) = block.get(sll_start..sll_end) else {
+            return;
+        };
+        let Some(hdr_end) = off.checked_add(hdr_len) else {
+            return;
+        };
+        let Some(h) = block.get(off..hdr_end) else {
+            return;
+        };
         let (Some(next), Some(sec), Some(nsec), Some(snaplen), Some(len), Some(mac)) = (
             rd_u32(h, offset_of!(H, tp_next_offset)),
             rd_u32(h, offset_of!(H, tp_sec)),
@@ -454,8 +465,13 @@ pub(crate) fn parse_block(
         let sll_ifindex = rd_u32(sll, offset_of!(L, sll_ifindex))
             .and_then(|v| u32::try_from(i32::from_ne_bytes(v.to_ne_bytes())).ok())
             .unwrap_or(ifindex);
-        let start = off + usize::from(mac);
-        let Some(data) = block.get(start..start + snaplen as usize) else {
+        let Some(start) = off.checked_add(usize::from(mac)) else {
+            return;
+        };
+        let Some(end) = start.checked_add(snaplen as usize) else {
+            return;
+        };
+        let Some(data) = block.get(start..end) else {
             return;
         };
         if !(skip_outgoing && pkttype == libc::PACKET_OUTGOING) {
@@ -469,7 +485,10 @@ pub(crate) fn parse_block(
         if next == 0 {
             return;
         }
-        off += next as usize;
+        let Some(next_off) = off.checked_add(next as usize) else {
+            return;
+        };
+        off = next_off;
     }
 }
 
@@ -561,9 +580,10 @@ mod tests {
         // Veri block sonunu aşıyor (snaplen büyük).
         b[offset_of!(H, tp_snaplen)..][..4].copy_from_slice(&10_000u32.to_ne_bytes());
         assert_eq!(walk(&b, 1, 0, false).len(), 0);
-        // Boş/çok küçük block, büyük ofset: panik yok.
+        // Boş/çok küçük block, büyük/taşan ofset: panik yok.
         assert_eq!(walk(&[], 5, 0, false).len(), 0);
         assert_eq!(walk(&b, 1, usize::MAX / 2, false).len(), 0);
+        assert_eq!(walk(&b, 1, usize::MAX, false).len(), 0);
     }
 
     #[test]

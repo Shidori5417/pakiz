@@ -27,7 +27,7 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
 clap = { version = "4", features = ["derive"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
+tokio = { version = "1", features = ["rt", "macros", "signal", "time"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
