@@ -251,7 +251,7 @@ impl LineOut {
             ..pakiz_flow::Config::default()
         })?;
         let mut an = Analyzer::new(flows);
-        if live {
+        if live && print {
             an.enable_processes();
         }
         Ok(Self {
@@ -471,7 +471,7 @@ async fn run_count(iface: String, cli: &Cli) -> Result<()> {
 }
 
 async fn run_lines(iface: String, cli: &Cli) -> Result<()> {
-    let mut out = LineOut::new(cli, true, true)?;
+    let mut out = LineOut::new(cli, cli.no_tui, true)?;
     let mut writer = cli.write.as_deref().map(create_writer).transpose()?;
     let (rx, handle) = open(iface, cli, false)?;
     let mut number = 0u64;
@@ -617,8 +617,6 @@ fn run_tui(cli: &Cli, settings: config::Settings) -> Result<()> {
 fn run_tui_file(path: &Path, cli: &Cli, settings: config::Settings) -> Result<()> {
     let file = IndexedFile::open(path).with_context(|| format!("{} açılamadı", path.display()))?;
     let mut app = App::from_file(file, path.display().to_string());
-    // Filtre hatası terminal hazırlanmadan bildirilsin.
-    set_initial_filter(&mut app, cli)?;
     let mut tui = Tui::new().context("terminal hazırlanamadı")?;
     apply_settings(&mut app, &mut tui, cli, settings)?;
     tui.run(&mut app)?;
@@ -712,5 +710,18 @@ mod tests {
         handle.stop().unwrap();
         assert!(!got.is_empty(), "filtreye uyan paket gelmedi");
         assert!(got.iter().all(|i| i.contains("47999")), "{got:?}");
+    }
+
+    #[test]
+    fn line_out_stats_only_does_not_print_lines() {
+        let cli_stats = Cli::parse_from(["pakiz", "-i", "lo", "--stats"]);
+        let out_stats = LineOut::new(&cli_stats, cli_stats.no_tui, true).unwrap();
+        assert!(!out_stats.print);
+        assert!(!out_stats.an.processes_enabled());
+
+        let cli_both = Cli::parse_from(["pakiz", "-i", "lo", "--no-tui", "--stats"]);
+        let out_both = LineOut::new(&cli_both, cli_both.no_tui, true).unwrap();
+        assert!(out_both.print);
+        assert!(out_both.an.processes_enabled());
     }
 }

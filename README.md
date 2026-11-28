@@ -126,7 +126,7 @@ pakiz --dump-config > ~/.config/pakiz/config.toml
 
 | Bayrak | Açıklama |
 |---|---|
-| `-i, --interface <ARAYÜZ>` | Yakalanacak arayüz (yoksa `general.default_interface`; TUI'de o da yoksa seçim ekranı açılır, `--no-tui` ve `--count`'ta hata verir) |
+| `-i, --interface <ARAYÜZ>` | Yakalanacak arayüz (yoksa `general.default_interface`; TUI'de o da yoksa seçim ekranı açılır, `--no-tui`, `--count` ve canlı modda `--stats` ile zorunludur) |
 | `-r, --read <DOSYA>` | pcap/pcapng dosyasından oku |
 | `-w, --write <DOSYA>` | Dosyaya yaz (`.pcapng` uzantısı → pcapng, diğerleri pcap) |
 | `-f, --capture-filter <FİLTRE>` | Kernel BPF yakalama filtresi |
